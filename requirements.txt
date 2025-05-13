@@ -1,0 +1,8 @@
+pandas==1.5.3
+numpy==1.21.6
+geopandas==0.12.2
+requests==2.31.0
+schedule==1.2.0
+shapely==2.0.2
+openpyxl==3.1.2
+fiona==1.8.22

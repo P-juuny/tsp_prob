@@ -1,0 +1,31 @@
+FROM python:3.9-slim
+
+# 필요한 시스템 패키지 설치
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 작업 디렉토리 생성
+WORKDIR /app
+
+# Python 의존성 설치
+COPY requirements_proxy.txt /app/
+RUN pip install --no-cache-dir -r requirements_proxy.txt
+
+# 애플리케이션 코드 복사
+COPY traffic_proxy.py /app/
+
+# 비root 사용자 생성
+RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# 포트 노출
+EXPOSE 8003
+
+# 서비스 시작
+CMD ["python", "-u", "traffic_proxy.py"]
+
+# 헬스체크
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -f http://localhost:8003/health || exit 1
