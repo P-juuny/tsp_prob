@@ -26,7 +26,7 @@ COPY get_valhalla_route.py /app/
 COPY auth.py /app/
 
 # 포트 노출
-EXPOSE 5002
+EXPOSE 5000
 
 # 서비스 시작
 CMD ["python", "/app/delivery_service.py"]
