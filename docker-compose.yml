@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     networks:
       - tsp_network
+    logging:
+      driver: none
     
   traffic-proxy:
     build:
@@ -26,6 +28,8 @@ services:
     restart: unless-stopped
     networks:
       - tsp_network
+    logging:
+      driver: none
     
   lkh:
     build:
@@ -37,6 +41,8 @@ services:
     restart: unless-stopped
     networks:
       - tsp_network
+    logging:
+      driver: none
     
   pickup-service:
     build:
@@ -60,6 +66,8 @@ services:
     restart: unless-stopped
     networks:
       - tsp_network
+    logging:
+      driver: none
   
   delivery-service:
     build:
@@ -85,6 +93,8 @@ services:
     restart: unless-stopped
     networks:
       - tsp_network
+    logging:
+      driver: none
 
 networks:
   tsp_network:
