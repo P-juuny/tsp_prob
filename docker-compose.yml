@@ -4,7 +4,7 @@ services:
     container_name: valhalla_seoul
     volumes:
       - ./valhalla_data:/custom_files
-      - ./valhalla.json:/custom_files/valhalla.json:ro
+      - ./valhalla_data/valhalla.json:/custom_files/valhalla.json:ro 
     restart: unless-stopped
     networks:
       - tsp_network
