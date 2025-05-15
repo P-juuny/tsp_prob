@@ -9,11 +9,9 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("/app/logs/lkh.log"),
-        logging.StreamHandler()
+        logging.StreamHandler()  # FileHandler 제거
     ]
 )
-
 app = Flask(__name__)
 
 @app.route('/health', methods=['GET'])

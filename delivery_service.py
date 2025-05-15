@@ -29,8 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("delivery_service.log"),
-        logging.StreamHandler()
+        logging.StreamHandler()  # FileHandler 제거
     ]
 )
 

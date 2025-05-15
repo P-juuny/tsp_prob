@@ -23,9 +23,6 @@ COPY main_service.py /app/
 COPY get_valhalla_matrix.py /app/
 COPY get_valhalla_route.py /app/
 
-# 로그 디렉토리 생성
-RUN mkdir -p /app/logs
-
 # 포트 노출
 EXPOSE 5000
 

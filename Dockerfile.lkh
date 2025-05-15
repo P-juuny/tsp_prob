@@ -33,9 +33,6 @@ RUN cd /app/lkh_src && \
 COPY lkh_app.py /app/
 COPY run_lkh_internal.py /app/
 
-# 로그 디렉토리 생성
-RUN mkdir -p /app/logs
-
 # 비root 사용자 생성
 RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
 USER appuser
