@@ -275,6 +275,10 @@ def complete_delivery():
         logging.error(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/delivery/status')  
+def status():
+    return jsonify({"status": "healthy"})
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5002))
     host = os.environ.get("HOST", "0.0.0.0")

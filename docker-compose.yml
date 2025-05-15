@@ -4,7 +4,6 @@ services:
     container_name: valhalla_seoul
     volumes:
       - ./valhalla_data:/custom_files
-      - ./valhalla_data/valhalla.json:/custom_files/valhalla.json:ro 
     restart: unless-stopped
     networks:
       - tsp_network
@@ -35,8 +34,6 @@ services:
     container_name: lkh_seoul
     ports:
       - "5001:5001"
-    volumes:
-      - ./logs/lkh:/app/logs
     restart: unless-stopped
     networks:
       - tsp_network
@@ -60,7 +57,6 @@ services:
       - FLASK_ENV=production
     volumes:
       - ./data:/data:ro
-      - ./logs/pickup:/app/logs
     restart: unless-stopped
     networks:
       - tsp_network
@@ -86,7 +82,6 @@ services:
       - FLASK_ENV=production
     volumes:
       - ./data:/data:ro
-      - ./logs/delivery:/app/logs
     restart: unless-stopped
     networks:
       - tsp_network

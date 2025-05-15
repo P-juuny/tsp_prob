@@ -389,6 +389,10 @@ def complete_pickup():
         logging.error(f"Error completing pickup: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
+@app.route('/api/pickup/status')
+def status():
+    return jsonify({"status": "healthy"})
+
 # --- 메인 실행 ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
