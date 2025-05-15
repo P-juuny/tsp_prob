@@ -7,11 +7,10 @@ from datetime import datetime, time as datetime_time
 from flask import Flask, request, jsonify
 import pytz
 
-# main_service에서 재활용
+# main_service에서 재활용 (call_lkh_service 제거)
 from main_service import (
     address_to_coordinates,
     determine_zone_by_district,
-    call_lkh_service,
     ZONE_MAPPING,
     HUB_LOCATION,
     COSTING_MODEL,
@@ -204,25 +203,33 @@ def get_next_delivery():
         time_matrix, _ = get_time_distance_matrix(coords, COSTING_MODEL)
         
         if time_matrix is not None:
-            tour, _ = call_lkh_service(time_matrix)
+            # LKH 서비스 직접 호출 (main_service.py와 동일한 방식)
+            response = requests.post(
+                LKH_SERVICE_URL,
+                json={"matrix": time_matrix.tolist()}
+            )
             
-            if tour and len(tour) > 1:
-                next_idx = tour[1]  # 현재 다음 위치
-                next_location = locations[next_idx]
+            if response.status_code == 200:
+                result = response.json()
+                tour = result.get("tour")
                 
-                route = get_turn_by_turn_route(
-                    current_location,
-                    {"lat": next_location["lat"], "lon": next_location["lon"]},
-                    COSTING_MODEL
-                )
-                
-                return jsonify({
-                    "status": "success",
-                    "next_destination": next_location,
-                    "route": route,
-                    "is_last": False,
-                    "remaining": len(pending)
-                }), 200
+                if tour and len(tour) > 1:
+                    next_idx = tour[1]  # 현재 다음 위치
+                    next_location = locations[next_idx]
+                    
+                    route = get_turn_by_turn_route(
+                        current_location,
+                        {"lat": next_location["lat"], "lon": next_location["lon"]},
+                        COSTING_MODEL
+                    )
+                    
+                    return jsonify({
+                        "status": "success",
+                        "next_destination": next_location,
+                        "route": route,
+                        "is_last": False,
+                        "remaining": len(pending)
+                    }), 200
         
         # 문제가 있으면 첫 번째로
         next_location = locations[1]
