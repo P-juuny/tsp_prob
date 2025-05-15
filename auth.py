@@ -41,6 +41,7 @@ def auth_required(f):
 def get_current_driver():
     """현재 로그인한 기사 정보 가져오기 (API 호출)"""
     import requests
+    from main_service import determine_zone_by_district
     
     try:
         user_id = request.current_user_id
@@ -62,10 +63,16 @@ def get_current_driver():
             
             if driver_response.status_code == 200:
                 driver_data = driver_response.json()
+                
+                # regionDistrict로부터 구역 결정
+                district = driver_data.get("regionDistrict", "")
+                zone = determine_zone_by_district(district)
+                
                 return {
                     "id": driver_data.get("id"),
                     "name": user_data.get("name"),
-                    "zone": driver_data.get("zone"),
+                    "zone": zone,
+                    "district": district,
                     "user_id": user_id
                 }
         
@@ -73,7 +80,8 @@ def get_current_driver():
         return {
             "id": user_id,
             "name": "Unknown Driver",
-            "zone": "Unknown"
+            "zone": "Unknown",
+            "district": ""
         }
             
     except Exception as e:
@@ -81,5 +89,6 @@ def get_current_driver():
         return {
             "id": getattr(request, 'current_user_id', 1),
             "name": "Default Driver",
-            "zone": "강남서부"
+            "zone": "강남서부",
+            "district": "강남구"
         }
