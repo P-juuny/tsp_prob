@@ -385,6 +385,71 @@ def complete_pickup():
         logging.error(f"Error completing pickup: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
+@app.route('/api/pickup/all-completed', methods=['GET'])
+def check_all_completed():
+    """모든 수거가 완료됐는지 확인하고 자동으로 배달 전환"""
+    try:
+        # 오늘 날짜
+        today = datetime.now(KST).strftime('%Y-%m-%d')
+        
+        # 모든 기사(1-5) 체크
+        all_drivers = [1, 2, 3, 4, 5]
+        total_pending = 0
+        total_completed = 0
+        
+        for driver_id in all_drivers:
+            parcels = get_driver_parcels(driver_id)
+            # 오늘 할당된 수거만 체크
+            today_parcels = [p for p in parcels 
+                           if p.get('assignedAt', '').startswith(today)]
+            
+            pending = [p for p in today_parcels if p['status'] == 'PENDING']
+            completed = [p for p in today_parcels if p['status'] == 'COMPLETED']
+            
+            total_pending += len(pending)
+            total_completed += len(completed)
+            
+            if pending:  # 아직 미완료 수거가 있음
+                return jsonify({
+                    "completed": False, 
+                    "remaining": total_pending,
+                    "completed_count": total_completed,
+                    "driver_status": f"Driver {driver_id} has {len(pending)} pending"
+                }), 200
+        
+        # 모든 수거가 완료됨
+        if total_completed > 0:  # 오늘 수거한 게 있을 때만
+            try:
+                # 배달로 자동 전환
+                import_response = requests.post("http://localhost:5002/api/delivery/import")
+                assign_response = requests.post("http://localhost:5002/api/delivery/assign")
+                
+                return jsonify({
+                    "completed": True,
+                    "message": "All pickups completed and converted to delivery",
+                    "total_converted": total_completed,
+                    "import_status": import_response.status_code,
+                    "assign_status": assign_response.status_code
+                }), 200
+                
+            except Exception as e:
+                logging.error(f"Error converting to delivery: {e}")
+                return jsonify({
+                    "completed": True,
+                    "error": "Failed to convert to delivery",
+                    "details": str(e)
+                }), 500
+        else:
+            return jsonify({
+                "completed": True,
+                "message": "No pickups today",
+                "total_completed": 0
+            }), 200
+            
+    except Exception as e:
+        logging.error(f"Error checking completion: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/pickup/status')
 def status():
     return jsonify({"status": "healthy"})
