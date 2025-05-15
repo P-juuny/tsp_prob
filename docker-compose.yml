@@ -8,7 +8,10 @@ services:
     networks:
       - tsp_network
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
     
   traffic-proxy:
     build:
@@ -29,7 +32,10 @@ services:
     networks:
       - tsp_network
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
     
   lkh:
     build:
@@ -42,7 +48,10 @@ services:
     networks:
       - tsp_network
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
     
   pickup-service:
     build:
@@ -67,7 +76,10 @@ services:
     networks:
       - tsp_network
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
   
   delivery-service:
     build:
@@ -94,7 +106,10 @@ services:
     networks:
       - tsp_network
     logging:
-      driver: none
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
 
 networks:
   tsp_network:
