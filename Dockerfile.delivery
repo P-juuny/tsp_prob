@@ -23,16 +23,17 @@ COPY delivery_service.py /app/
 COPY main_service.py /app/
 COPY get_valhalla_matrix.py /app/
 COPY get_valhalla_route.py /app/
+COPY auth.py /app/
 
-# 로그 디렉토리 생성
-RUN mkdir -p /app/logs
+# 로그 디렉토리 생성 및 권한 설정
+RUN mkdir -p /app/logs && chmod 777 /app/logs
 
 # 포트 노출
-EXPOSE 5000
+EXPOSE 5002
 
 # 서비스 시작
 CMD ["python", "/app/delivery_service.py"]
 
 # 헬스체크
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD curl -f http://localhost:5000/api/delivery/status || exit 1
+  CMD curl -f http://localhost:5002/api/delivery/status || exit 1

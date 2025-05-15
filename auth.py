@@ -2,12 +2,10 @@ import os
 import jwt
 from flask import request, jsonify
 from functools import wraps
-from sqlalchemy.orm import Session
-from models import User, DriverInfo
-from database import get_db
 
 # 환경변수
-JWT_SECRET = os.environ.get("JWT_SECRET")
+JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key")
+BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://backend:8080")
 
 def auth_required(f):
     """인증 확인 데코레이터"""
@@ -40,19 +38,48 @@ def auth_required(f):
     
     return decorated_function
 
-def get_current_driver(db: Session):
-    """현재 로그인한 기사 정보 가져오기"""
-    user_id = request.current_user_id
+def get_current_driver():
+    """현재 로그인한 기사 정보 가져오기 (API 호출)"""
+    import requests
     
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        return None
-    
-    driver_info = db.query(DriverInfo).filter(
-        DriverInfo.userId == user_id
-    ).first()
-    
-    return {
-        "user": user,
-        "driver_info": driver_info
-    }
+    try:
+        user_id = request.current_user_id
+        
+        # 백엔드 API에서 사용자 정보 가져오기
+        response = requests.get(
+            f"{BACKEND_API_URL}/api/user/{user_id}",
+            headers={"Authorization": request.headers.get('Authorization')}
+        )
+        
+        if response.status_code == 200:
+            user_data = response.json()
+            
+            # 기사 정보 가져오기
+            driver_response = requests.get(
+                f"{BACKEND_API_URL}/api/driver/user/{user_id}",
+                headers={"Authorization": request.headers.get('Authorization')}
+            )
+            
+            if driver_response.status_code == 200:
+                driver_data = driver_response.json()
+                return {
+                    "id": driver_data.get("id"),
+                    "name": user_data.get("name"),
+                    "zone": driver_data.get("zone"),
+                    "user_id": user_id
+                }
+        
+        # API 호출 실패시 기본값 반환
+        return {
+            "id": user_id,
+            "name": "Unknown Driver",
+            "zone": "Unknown"
+        }
+            
+    except Exception as e:
+        # 에러 발생시 기본값 반환
+        return {
+            "id": getattr(request, 'current_user_id', 1),
+            "name": "Default Driver",
+            "zone": "강남서부"
+        }
