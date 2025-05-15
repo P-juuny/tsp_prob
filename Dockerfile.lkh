@@ -21,6 +21,8 @@ RUN cd /app/lkh_src && \
     LKH_DIR=$(find . -maxdepth 1 -name 'LKH-*' -type d -print -quit) && \
     if [ -z "$LKH_DIR" ]; then echo "LKH source directory not found!" && exit 1; fi && \
     cd "$LKH_DIR" && \
+    # OBJ 디렉토리 생성
+    mkdir -p SRC/OBJ && \
     make && \
     cp LKH /usr/local/bin/LKH && \
     chmod +x /usr/local/bin/LKH && \
