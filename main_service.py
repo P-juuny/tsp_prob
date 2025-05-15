@@ -30,14 +30,26 @@ VALHALLA_PORT = os.environ.get("VALHALLA_PORT", "8003")
 
 # 한국 시간대 설정
 KST = pytz.timezone('Asia/Seoul')
+PICKUP_START_TIME = datetime_time(7, 0)  # 오전 7시
 
-# 구역별 구 매핑
-ZONE_MAPPING = {
-    "강북서부": ["은평구", "서대문구", "마포구"],
-    "강북동부": ["도봉구", "노원구", "강북구", "성북구"],
-    "강북중부": ["종로구", "중구", "용산구"],
-    "강남서부": ["강서구", "양천구", "구로구", "영등포구", "동작구", "관악구", "금천구"],
-    "강남동부": ["성동구", "광진구", "동대문구", "중랑구", "강동구", "송파구", "강남구", "서초구"]
+# 구별 기사 직접 매핑
+DISTRICT_DRIVER_MAPPING = {
+    # 강북서부 (driver_id: 1)
+    "은평구": 1, "서대문구": 1, "마포구": 1,
+    
+    # 강북동부 (driver_id: 2)
+    "도봉구": 2, "노원구": 2, "강북구": 2, "성북구": 2,
+    
+    # 강북중부 (driver_id: 3)
+    "종로구": 3, "중구": 3, "용산구": 3,
+    
+    # 강남서부 (driver_id: 4)
+    "강서구": 4, "양천구": 4, "구로구": 4, "영등포구": 4, 
+    "동작구": 4, "관악구": 4, "금천구": 4,
+    
+    # 강남동부 (driver_id: 5)
+    "성동구": 5, "광진구": 5, "동대문구": 5, "중랑구": 5, 
+    "강동구": 5, "송파구": 5, "강남구": 5, "서초구": 5
 }
 
 # Flask 앱 설정
@@ -91,19 +103,6 @@ def get_driver_parcels(driver_id):
     except Exception as e:
         logging.error(f"Error getting driver parcels: {e}")
         return []
-
-def get_zone_driver(zone):
-    """구역별 기사 정보 가져오기"""
-    try:
-        response = requests.get(
-            f"{BACKEND_API_URL}/api/zone/{zone}/driver"
-        )
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception as e:
-        logging.error(f"Error getting zone driver: {e}")
-        return None
 
 # --- 주소 처리 함수들 ---
 def address_to_coordinates(address):
@@ -168,30 +167,11 @@ def get_default_coordinates(address):
     
     return (37.5665, 126.9780)
 
-def determine_zone_by_district(district):
-    """구 이름으로 구역 결정"""
-    for zone, districts in ZONE_MAPPING.items():
-        if district in districts:
-            return zone
-    return None
-
 # --- API 엔드포인트 ---
 
 @app.route('/api/pickup/webhook', methods=['POST'])
 def webhook_new_pickup():
-    """백엔드에서 새 수거 추가시 호출하는 웹훅
-    
-    백엔드가 이미 DB에 저장한 수거 정보:
-    - id: 고유번호
-    - ownerId: 매장 ID
-    - recipientAddr: 수신자 주소
-    - pickupDate: 수거 예정일 (백엔드가 판단)
-      - 7시 이전: 다음날 7시
-      - 7시-12시: 당일
-      - 12시 이후: 다음날 7시
-    - status: PENDING
-    - driverId: NULL (아직 미할당)
-    """
+    """백엔드에서 새 수거 추가시 호출하는 웹훅"""
     try:
         data = request.json
         parcel_id = data.get('parcelId')
@@ -208,7 +188,7 @@ def webhook_new_pickup():
         if parcel.get('driverId'):
             return jsonify({"status": "already_processed"}), 200
         
-        # 주소로 구역 결정
+        # 주소로 좌표 변환
         address = parcel.get('recipientAddr', '')
         lat, lon = address_to_coordinates(address)
         
@@ -223,25 +203,21 @@ def webhook_new_pickup():
         if not district:
             return jsonify({"error": "Could not determine district"}), 400
         
-        zone = determine_zone_by_district(district)
-        if not zone:
-            return jsonify({"error": "Invalid district"}), 400
-        
-        # 해당 구역 기사 정보 가져오기
-        driver_info = get_zone_driver(zone)
-        if not driver_info:
+        # 구별로 기사 직접 할당
+        driver_id = DISTRICT_DRIVER_MAPPING.get(district)
+        if not driver_id:
             return jsonify({
                 "status": "error",
-                "message": f"No driver assigned to zone {zone}"
+                "message": f"No driver for district {district}"
             }), 500
         
         # 백엔드에 기사 할당 요청
-        if assign_driver_to_parcel(parcel_id, driver_info['id']):
+        if assign_driver_to_parcel(parcel_id, driver_id):
             return jsonify({
                 "status": "success",
                 "parcelId": parcel_id,
-                "zone": zone,
-                "driverId": driver_info['id'],
+                "district": district,        # 구만 반환
+                "driverId": driver_id,       # 할당된 기사 ID
                 "coordinates": {"lat": lat, "lon": lon}
             }), 200
         else:
@@ -255,6 +231,26 @@ def webhook_new_pickup():
 def get_next_destination(driver_id):
     """기사의 다음 최적 목적지 계산"""
     try:
+        # driver_id는 1-5 중 하나 (고정)
+        if driver_id not in [1, 2, 3, 4, 5]:
+            return jsonify({"error": "Invalid driver_id"}), 400
+        
+        # 시간 체크 추가
+        current_time = datetime.now(KST).time()
+        if current_time < PICKUP_START_TIME:  # 오전 7시 이전
+            hours_left = PICKUP_START_TIME.hour - current_time.hour
+            minutes_left = PICKUP_START_TIME.minute - current_time.minute
+            if minutes_left < 0:
+                hours_left -= 1
+                minutes_left += 60
+            
+            return jsonify({
+                "status": "waiting",
+                "message": f"수거는 오전 7시부터 시작됩니다. {hours_left}시간 {minutes_left}분 남았습니다.",
+                "start_time": "07:00",
+                "current_time": current_time.strftime("%H:%M")
+            }), 200
+            
         # 백엔드에서 기사의 미완료 수거 목록 가져오기
         parcels = get_driver_parcels(driver_id)
         pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
