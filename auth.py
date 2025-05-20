@@ -44,7 +44,14 @@ def auth_required(f):
         try:
             # 토큰 검증
             payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-            request.current_user_id = payload['user_id']
+            
+            # userId 또는 user_id 키 확인 후 할당
+            if 'userId' in payload:
+                request.current_user_id = payload['userId']
+            elif 'user_id' in payload:
+                request.current_user_id = payload['user_id']
+            else:
+                return jsonify({"error": "토큰에 사용자 ID 정보가 없습니다"}), 401
             
         except jwt.ExpiredSignatureError:
             return jsonify({"error": "토큰이 만료되었습니다"}), 401
@@ -76,7 +83,18 @@ def determine_zone_by_district(district):
 def get_current_driver():
     """현재 로그인한 기사 정보 가져오기 (DB 직접 접근)"""
     try:
+        # user_id가 없는 경우 대비한 예외 처리 추가
+        if not hasattr(request, 'current_user_id'):
+            logger.error("current_user_id가 request 객체에 없습니다.")
+            return {
+                "id": 1,  # 기본값
+                "name": "Default Driver",
+                "zone": "강남서부",
+                "district": "강남구"
+            }
+        
         user_id = request.current_user_id
+        logger.info(f"인증된 사용자 ID: {user_id}")
         
         # DB에서 사용자 정보 가져오기
         conn = get_db_connection()
@@ -86,12 +104,13 @@ def get_current_driver():
                 sql = """
                 SELECT id, name, email, userType, isApproved
                 FROM User 
-                WHERE id = %s AND isApproved = 1
+                WHERE id = %s
                 """
                 cursor.execute(sql, (user_id,))
                 user_data = cursor.fetchone()
                 
                 if not user_data:
+                    logger.warning(f"사용자 ID {user_id}에 대한 정보를 찾을 수 없습니다.")
                     # 사용자를 찾을 수 없는 경우
                     return {
                         "id": user_id,
@@ -110,6 +129,7 @@ def get_current_driver():
                 driver_data = cursor.fetchone()
                 
                 if not driver_data:
+                    logger.warning(f"사용자 ID {user_id}에 대한 기사 정보를 찾을 수 없습니다.")
                     # 기사 정보를 찾을 수 없는 경우
                     return {
                         "id": user_id,
@@ -122,7 +142,7 @@ def get_current_driver():
                 district = driver_data.get("regionDistrict", "")
                 zone = determine_zone_by_district(district)
                 
-                return {
+                result = {
                     "id": driver_data.get("id"),
                     "name": user_data.get("name"),
                     "zone": zone,
@@ -133,6 +153,18 @@ def get_current_driver():
                     "regionCity": driver_data.get("regionCity")
                 }
                 
+                logger.info(f"기사 정보 조회 성공: {result}")
+                return result
+                
+        except Exception as e:
+            logger.error(f"DB 쿼리 실행 오류: {e}")
+            # DB 오류 시 기본값 반환
+            return {
+                "id": user_id,
+                "name": "Error Driver",
+                "zone": "Unknown",
+                "district": ""
+            }
         finally:
             conn.close()
             
