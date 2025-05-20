@@ -3,6 +3,7 @@ import json
 import numpy as np
 import logging
 import os
+import pymysql
 from datetime import datetime, time as datetime_time
 from flask import Flask, request, jsonify
 import pytz
@@ -53,6 +54,202 @@ DISTRICT_DRIVER_MAPPING = {
 
 # Flask 앱 설정
 app = Flask(__name__)
+
+# --- DB 접근 함수들 ---
+def get_db_connection():
+    """DB 연결 생성"""
+    return pymysql.connect(
+        host=os.environ.get("MYSQL_HOST", "subtrack-rds.cv860smoa37l.ap-northeast-2.rds.amazonaws.com"),
+        user=os.environ.get("MYSQL_USER", "admin"),
+        password=os.environ.get("MYSQL_PASSWORD", "adminsubtrack"),
+        db=os.environ.get("MYSQL_DATABASE", "subtrack"),
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+def get_completed_pickups_today_from_db():
+    """DB에서 오늘 완료된 수거 목록 가져오기"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName, 
+                   pd.name as pickupDriverName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            LEFT JOIN User pd ON p.pickupDriverId = pd.id
+            WHERE p.status = 'PICKUP_COMPLETED' 
+            AND DATE(p.pickupCompletedAt) = CURDATE()
+            AND p.isDeleted = 0
+            AND p.deliveryDriverId IS NULL
+            """
+            cursor.execute(sql)
+            parcels = cursor.fetchall()
+            
+            # 날짜 필드를 문자열로 변환
+            for p in parcels:
+                for key, value in p.items():
+                    if isinstance(value, datetime):
+                        p[key] = value.isoformat()
+            
+            return parcels
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_unassigned_deliveries_today_from_db():
+    """DB에서 오늘 미할당 배달 목록 가져오기"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            WHERE p.status = 'DELIVERY_PENDING' 
+            AND deliveryDriverId IS NULL
+            AND DATE(p.pickupCompletedAt) = CURDATE()
+            AND p.isDeleted = 0
+            """
+            cursor.execute(sql)
+            deliveries = cursor.fetchall()
+            
+            # 날짜 필드를 문자열로 변환
+            for p in deliveries:
+                for key, value in p.items():
+                    if isinstance(value, datetime):
+                        p[key] = value.isoformat()
+            
+            return deliveries
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_driver_deliveries_from_db(driver_id):
+    """DB에서 배달 기사의 배달 목록 가져오기"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            WHERE p.deliveryDriverId = %s
+            AND (p.status = 'DELIVERY_PENDING' OR p.status = 'DELIVERY_COMPLETED')
+            AND p.isDeleted = 0
+            ORDER BY p.isNextDeliveryTarget DESC, p.createdAt ASC
+            """
+            cursor.execute(sql, (driver_id,))
+            deliveries = cursor.fetchall()
+            
+            # 날짜 필드를 문자열로 변환하고 상태값 변환
+            result = []
+            for p in deliveries:
+                # 상태값 변환
+                status = 'IN_PROGRESS' if p['status'] == 'DELIVERY_PENDING' else 'COMPLETED'
+                
+                # 날짜 필드 처리
+                delivery_completed_at = p['deliveryCompletedAt'].isoformat() if p['deliveryCompletedAt'] else None
+                pickup_completed_at = p['pickupCompletedAt'].isoformat() if p['pickupCompletedAt'] else None
+                
+                item = {
+                    'id': p['id'],
+                    'status': status,
+                    'recipientAddr': p['recipientAddr'],
+                    'productName': p['productName'],
+                    'completedAt': delivery_completed_at,
+                    'pickupCompletedAt': pickup_completed_at,
+                    'ownerId': p['ownerId'],
+                    'ownerName': p.get('ownerName'),
+                    'size': p['size'],
+                    'isNextDeliveryTarget': p['isNextDeliveryTarget'],
+                    'recipientName': p['recipientName'],
+                    'recipientPhone': p['recipientPhone']
+                }
+                result.append(item)
+            
+            return result
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        return []
+    finally:
+        conn.close()
+
+def convert_pickup_to_delivery_in_db(pickup_id):
+    """DB에서 수거를 배달로 전환"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            UPDATE Parcel 
+            SET status = 'DELIVERY_PENDING' 
+            WHERE id = %s 
+            AND status = 'PICKUP_COMPLETED'
+            AND isDeleted = 0
+            """
+            cursor.execute(sql, (pickup_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def assign_delivery_driver_in_db(delivery_id, driver_id):
+    """DB에서 배달 기사 할당"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            UPDATE Parcel 
+            SET deliveryDriverId = %s,
+                isNextDeliveryTarget = TRUE
+            WHERE id = %s 
+            AND status = 'DELIVERY_PENDING'
+            AND isDeleted = 0
+            """
+            cursor.execute(sql, (driver_id, delivery_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def complete_delivery_in_db(delivery_id):
+    """DB에서 배달 완료 처리"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            UPDATE Parcel 
+            SET status = 'DELIVERY_COMPLETED',
+                isNextDeliveryTarget = FALSE,
+                deliveryCompletedAt = NOW()
+            WHERE id = %s 
+            AND status = 'DELIVERY_PENDING'
+            AND isDeleted = 0
+            """
+            cursor.execute(sql, (delivery_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 # --- 주소 처리 함수들 (main_service.py에서 복사) ---
 def address_to_coordinates(address):
@@ -123,25 +320,16 @@ def get_default_coordinates(address):
 def import_todays_pickups():
     """오늘 수거 완료된 것들을 배달로 전환 (관리자용)"""
     try:
-        # 백엔드에서 오늘 완료된 수거 목록 가져오기
-        response = requests.get(f"{BACKEND_API_URL}/api/pickups/completed/today")
-        if response.status_code != 200:
-            return jsonify({"error": "Failed to get completed pickups"}), 500
-        
-        completed_pickups = response.json()
+        # DB에서 오늘 완료된 수거 목록 가져오기
+        completed_pickups = get_completed_pickups_today_from_db()
         
         # 각 수거를 배달로 전환
         converted_count = 0
-        district_stats = {}  # zone_stats -> district_stats
+        district_stats = {}  # 구별 통계
         
         for pickup in completed_pickups:
-            # 백엔드에 배달 전환 요청
-            convert_resp = requests.post(
-                f"{BACKEND_API_URL}/api/delivery/convert",
-                json={"pickupId": pickup['id']}
-            )
-            
-            if convert_resp.status_code == 200:
+            # DB에서 배달로 전환
+            if convert_pickup_to_delivery_in_db(pickup['id']):
                 converted_count += 1
                 
                 # 구별 통계
@@ -154,7 +342,7 @@ def import_todays_pickups():
         return jsonify({
             "status": "success",
             "converted": converted_count,
-            "by_district": district_stats  # by_zone -> by_district
+            "by_district": district_stats
         }), 200
         
     except Exception as e:
@@ -165,12 +353,8 @@ def import_todays_pickups():
 def assign_to_drivers():
     """배달 물건들을 기사에게 할당 (관리자용)"""
     try:
-        # 미할당 배달 목록 가져오기
-        response = requests.get(f"{BACKEND_API_URL}/api/deliveries/unassigned/today")
-        if response.status_code != 200:
-            return jsonify({"error": "Failed to get deliveries"}), 500
-        
-        unassigned = response.json()
+        # DB에서 미할당 배달 목록 가져오기
+        unassigned = get_unassigned_deliveries_today_from_db()
         
         # 구별로 분류
         district_deliveries = {}
@@ -191,15 +375,14 @@ def assign_to_drivers():
             
             if driver_id:
                 # 배달 할당
+                assign_count = 0
                 for delivery in deliveries:
-                    requests.put(
-                        f"{BACKEND_API_URL}/api/delivery/{delivery['id']}/assign",
-                        json={"driverId": driver_id}
-                    )
+                    if assign_delivery_driver_in_db(delivery['id'], driver_id):
+                        assign_count += 1
                 
                 results[district] = {
                     "driver_id": driver_id,
-                    "count": len(deliveries)
+                    "count": assign_count
                 }
         
         return jsonify({"status": "success", "assignments": results}), 200
@@ -233,12 +416,8 @@ def get_next_delivery():
         driver_info = get_current_driver()
         driver_id = driver_info['id']
         
-        # 백엔드에서 내 배달 목록 가져오기
-        response = requests.get(f"{BACKEND_API_URL}/api/driver/{driver_id}/deliveries/today")
-        if response.status_code != 200:
-            return jsonify({"error": "Failed to get deliveries"}), 500
-        
-        my_deliveries = response.json()
+        # DB에서 내 배달 목록 가져오기
+        my_deliveries = get_driver_deliveries_from_db(driver_id)
         pending = [d for d in my_deliveries if d['status'] == 'IN_PROGRESS']
         
         if not pending:
@@ -347,12 +526,8 @@ def complete_delivery():
         if not delivery_id:
             return jsonify({"error": "deliveryId required"}), 400
         
-        # 백엔드에 완료 요청
-        response = requests.put(
-            f"{BACKEND_API_URL}/api/delivery/{delivery_id}/complete"
-        )
-        
-        if response.status_code == 200:
+        # DB에서 완료 처리
+        if complete_delivery_in_db(delivery_id):
             return jsonify({"status": "success"}), 200
         else:
             return jsonify({"error": "Failed to complete"}), 500
@@ -364,6 +539,50 @@ def complete_delivery():
 @app.route('/api/delivery/status')  
 def status():
     return jsonify({"status": "healthy"})
+
+# 디버깅용 엔드포인트 - DB 직접 확인
+@app.route('/api/debug/db-check')
+def check_db_connection():
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            # 수거/배달 상태별 통계
+            cursor.execute("""
+                SELECT status, COUNT(*) as count 
+                FROM Parcel 
+                WHERE isDeleted = 0
+                GROUP BY status
+            """)
+            status_counts = cursor.fetchall()
+            
+            # 오늘 날짜 조회
+            cursor.execute("SELECT CURDATE() as today")
+            today = cursor.fetchone()
+            
+            # 오늘 완료된 수거/배달 건수
+            cursor.execute("""
+                SELECT 
+                    COUNT(CASE WHEN status = 'PICKUP_COMPLETED' AND DATE(pickupCompletedAt) = CURDATE() THEN 1 END) as pickup_completed,
+                    COUNT(CASE WHEN status = 'DELIVERY_COMPLETED' AND DATE(deliveryCompletedAt) = CURDATE() THEN 1 END) as delivery_completed
+                FROM Parcel
+                WHERE isDeleted = 0
+            """)
+            today_counts = cursor.fetchone()
+        
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "connection": "ok",
+            "today": today['today'].isoformat() if today else None,
+            "status_counts": status_counts,
+            "today_counts": today_counts
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"DB connection failed: {str(e)}"
+        }), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5002))

@@ -1,11 +1,28 @@
 import os
 import jwt
+import pymysql
+import logging
 from flask import request, jsonify
 from functools import wraps
 
 # 환경변수
 JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key")
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "http://backend:8080")
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def get_db_connection():
+    """DB 연결 생성"""
+    return pymysql.connect(
+        host=os.environ.get("MYSQL_HOST", "subtrack-rds.cv860smoa37l.ap-northeast-2.rds.amazonaws.com"),
+        user=os.environ.get("MYSQL_USER", "admin"),
+        password=os.environ.get("MYSQL_PASSWORD", "adminsubtrack"),
+        db=os.environ.get("MYSQL_DATABASE", "subtrack"),
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
 
 def auth_required(f):
     """인증 확인 데코레이터"""
@@ -38,33 +55,70 @@ def auth_required(f):
     
     return decorated_function
 
+def determine_zone_by_district(district):
+    """구별 구역 결정 함수"""
+    district_zone_mapping = {
+        # 강북서부
+        "은평구": "강북서부", "서대문구": "강북서부", "마포구": "강북서부",
+        # 강북동부
+        "도봉구": "강북동부", "노원구": "강북동부", "강북구": "강북동부", "성북구": "강북동부",
+        # 강북중부
+        "종로구": "강북중부", "중구": "강북중부", "용산구": "강북중부",
+        # 강남서부
+        "강서구": "강남서부", "양천구": "강남서부", "구로구": "강남서부", 
+        "영등포구": "강남서부", "동작구": "강남서부", "관악구": "강남서부", "금천구": "강남서부",
+        # 강남동부
+        "성동구": "강남동부", "광진구": "강남동부", "동대문구": "강남동부", "중랑구": "강남동부",
+        "강동구": "강남동부", "송파구": "강남동부", "강남구": "강남동부", "서초구": "강남동부"
+    }
+    return district_zone_mapping.get(district, "Unknown")
+
 def get_current_driver():
-    """현재 로그인한 기사 정보 가져오기 (API 호출)"""
-    import requests
-    from main_service import determine_zone_by_district
-    
+    """현재 로그인한 기사 정보 가져오기 (DB 직접 접근)"""
     try:
         user_id = request.current_user_id
         
-        # 백엔드 API에서 사용자 정보 가져오기
-        response = requests.get(
-            f"{BACKEND_API_URL}/api/user/{user_id}",
-            headers={"Authorization": request.headers.get('Authorization')}
-        )
-        
-        if response.status_code == 200:
-            user_data = response.json()
-            
-            # 기사 정보 가져오기
-            driver_response = requests.get(
-                f"{BACKEND_API_URL}/api/driver/user/{user_id}",
-                headers={"Authorization": request.headers.get('Authorization')}
-            )
-            
-            if driver_response.status_code == 200:
-                driver_data = driver_response.json()
+        # DB에서 사용자 정보 가져오기
+        conn = get_db_connection()
+        try:
+            # 사용자 정보 조회
+            with conn.cursor() as cursor:
+                sql = """
+                SELECT id, name, email, userType, isApproved
+                FROM User 
+                WHERE id = %s AND isApproved = 1
+                """
+                cursor.execute(sql, (user_id,))
+                user_data = cursor.fetchone()
                 
-                # regionDistrict로부터 구역 결정
+                if not user_data:
+                    # 사용자를 찾을 수 없는 경우
+                    return {
+                        "id": user_id,
+                        "name": "Unknown Driver",
+                        "zone": "Unknown",
+                        "district": ""
+                    }
+                
+                # 기사 정보 조회
+                sql = """
+                SELECT id, userId, phoneNumber, vehicleNumber, regionCity, regionDistrict
+                FROM DriverInfo
+                WHERE userId = %s
+                """
+                cursor.execute(sql, (user_id,))
+                driver_data = cursor.fetchone()
+                
+                if not driver_data:
+                    # 기사 정보를 찾을 수 없는 경우
+                    return {
+                        "id": user_id,
+                        "name": user_data.get('name', 'Unknown Driver'),
+                        "zone": "Unknown",
+                        "district": ""
+                    }
+                
+                # 구별 구역 결정
                 district = driver_data.get("regionDistrict", "")
                 zone = determine_zone_by_district(district)
                 
@@ -73,18 +127,17 @@ def get_current_driver():
                     "name": user_data.get("name"),
                     "zone": zone,
                     "district": district,
-                    "user_id": user_id
+                    "user_id": user_id,
+                    "phoneNumber": driver_data.get("phoneNumber"),
+                    "vehicleNumber": driver_data.get("vehicleNumber"),
+                    "regionCity": driver_data.get("regionCity")
                 }
-        
-        # API 호출 실패시 기본값 반환
-        return {
-            "id": user_id,
-            "name": "Unknown Driver",
-            "zone": "Unknown",
-            "district": ""
-        }
+                
+        finally:
+            conn.close()
             
     except Exception as e:
+        logger.error(f"DB에서 기사 정보 조회 오류: {e}")
         # 에러 발생시 기본값 반환
         return {
             "id": getattr(request, 'current_user_id', 1),

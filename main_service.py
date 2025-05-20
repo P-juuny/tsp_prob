@@ -3,6 +3,7 @@ import json
 import numpy as np
 import logging
 import os
+import pymysql
 from datetime import datetime, timedelta, time as datetime_time
 from flask import Flask, request, jsonify
 import pytz
@@ -55,54 +56,195 @@ DISTRICT_DRIVER_MAPPING = {
 # Flask 앱 설정
 app = Flask(__name__)
 
-# --- 백엔드 API 호출 함수들 ---
-def get_parcel_from_backend(parcel_id):
-    """백엔드에서 수거 정보 가져오기"""
+# --- DB 접근 함수들 ---
+def get_db_connection():
+    """DB 연결 생성"""
+    return pymysql.connect(
+        host=os.environ.get("MYSQL_HOST", "subtrack-rds.cv860smoa37l.ap-northeast-2.rds.amazonaws.com"),
+        user=os.environ.get("MYSQL_USER", "admin"),
+        password=os.environ.get("MYSQL_PASSWORD", "adminsubtrack"),
+        db=os.environ.get("MYSQL_DATABASE", "subtrack"),
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+def get_parcel_from_db(parcel_id):
+    """DB에서 직접 소포 정보 가져오기"""
+    conn = get_db_connection()
     try:
-        response = requests.get(f"{BACKEND_API_URL}/api/parcel/{parcel_id}")
-        if response.status_code == 200:
-            return response.json()
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName, 
+                   pd.name as pickupDriverName, 
+                   dd.name as deliveryDriverName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            LEFT JOIN User pd ON p.pickupDriverId = pd.id
+            LEFT JOIN User dd ON p.deliveryDriverId = dd.id
+            WHERE p.id = %s AND p.isDeleted = 0
+            """
+            cursor.execute(sql, (parcel_id,))
+            parcel = cursor.fetchone()
+            
+            if parcel:
+                # 필드명 변환 (Prisma 스키마와 Python 코드 간 맞추기)
+                if 'pickupDriverId' in parcel:
+                    parcel['driverId'] = parcel['pickupDriverId']
+                
+                # 날짜 타입을 문자열로 변환
+                for key, value in parcel.items():
+                    if isinstance(value, datetime):
+                        parcel[key] = value.isoformat()
+                        
+                # 상태값 변환 (DB의 ParcelStatus enum -> 'PENDING'/'COMPLETED')
+                if parcel['status'] == 'PICKUP_PENDING':
+                    parcel['status'] = 'PENDING'
+                elif parcel['status'] == 'PICKUP_COMPLETED':
+                    parcel['status'] = 'COMPLETED'
+                
+                return parcel
+            return None
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
         return None
-    except Exception as e:
-        logging.error(f"Error getting parcel from backend: {e}")
-        return None
+    finally:
+        conn.close()
 
-def assign_driver_to_parcel(parcel_id, driver_id):
-    """백엔드에 기사 할당 요청"""
+def get_driver_parcels_from_db(driver_id):
+    """DB에서 직접 기사 할당 소포 목록 가져오기"""
+    conn = get_db_connection()
     try:
-        payload = {"driverId": driver_id}
-        response = requests.put(
-            f"{BACKEND_API_URL}/api/parcel/{parcel_id}/assign",
-            json=payload
-        )
-        return response.status_code == 200
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            WHERE p.pickupDriverId = %s AND p.isDeleted = 0
+            ORDER BY p.createdAt DESC
+            """
+            cursor.execute(sql, (driver_id,))
+            parcels = cursor.fetchall()
+            
+            # API 응답 형식에 맞게 변환
+            result = []
+            for p in parcels:
+                # 상태값 변환 (DB의 ParcelStatus enum -> 'PENDING'/'COMPLETED')
+                status = 'PENDING' if p['status'] == 'PICKUP_PENDING' else 'COMPLETED'
+                
+                # 날짜 필드 처리
+                completed_at = p['pickupCompletedAt'].isoformat() if p['pickupCompletedAt'] else None
+                created_at = p['createdAt'].isoformat() if p['createdAt'] else None
+                
+                item = {
+                    'id': p['id'],
+                    'status': status,
+                    'recipientAddr': p['recipientAddr'],
+                    'productName': p['productName'],
+                    'completedAt': completed_at,
+                    'assignedAt': created_at,
+                    'ownerId': p['ownerId'],
+                    'ownerName': p.get('ownerName'),
+                    'size': p['size']
+                }
+                result.append(item)
+            
+            return result
     except Exception as e:
-        logging.error(f"Error assigning driver: {e}")
-        return False
-
-def complete_parcel(parcel_id):
-    """백엔드에 수거 완료 요청"""
-    try:
-        response = requests.put(
-            f"{BACKEND_API_URL}/api/parcel/{parcel_id}/complete"
-        )
-        return response.status_code == 200
-    except Exception as e:
-        logging.error(f"Error completing parcel: {e}")
-        return False
-
-def get_driver_parcels(driver_id):
-    """기사에게 할당된 수거 목록 가져오기"""
-    try:
-        response = requests.get(
-            f"{BACKEND_API_URL}/api/driver/{driver_id}/parcels"
-        )
-        if response.status_code == 200:
-            return response.json()
+        logging.error(f"DB 쿼리 오류: {e}")
         return []
+    finally:
+        conn.close()
+
+def assign_driver_to_parcel_in_db(parcel_id, driver_id):
+    """DB에서 직접 기사 할당"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            UPDATE Parcel 
+            SET pickupDriverId = %s, 
+                status = 'PICKUP_PENDING', 
+                isNextPickupTarget = TRUE
+            WHERE id = %s AND isDeleted = 0
+            """
+            cursor.execute(sql, (driver_id, parcel_id))
+        conn.commit()
+        return cursor.rowcount > 0
     except Exception as e:
-        logging.error(f"Error getting driver parcels: {e}")
+        logging.error(f"DB 쿼리 오류: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def complete_parcel_in_db(parcel_id):
+    """DB에서 직접 수거 완료 처리"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            UPDATE Parcel 
+            SET status = 'PICKUP_COMPLETED', 
+                isNextPickupTarget = FALSE,
+                pickupCompletedAt = NOW() 
+            WHERE id = %s AND isDeleted = 0
+            """
+            cursor.execute(sql, (parcel_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def get_completed_pickups_today_from_db():
+    """DB에서 오늘 완료된 수거 목록 가져오기"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            WHERE p.status = 'PICKUP_COMPLETED' 
+            AND DATE(p.pickupCompletedAt) = CURDATE()
+            AND p.isDeleted = 0
+            """
+            cursor.execute(sql)
+            parcels = cursor.fetchall()
+            
+            # API 응답 형식에 맞게 변환
+            result = []
+            for p in parcels:
+                # 날짜 필드 처리
+                completed_at = p['pickupCompletedAt'].isoformat() if p['pickupCompletedAt'] else None
+                created_at = p['createdAt'].isoformat() if p['createdAt'] else None
+                
+                item = {
+                    'id': p['id'],
+                    'status': 'COMPLETED',
+                    'recipientAddr': p['recipientAddr'],
+                    'productName': p['productName'],
+                    'completedAt': completed_at,
+                    'assignedAt': created_at,
+                    'ownerId': p['ownerId'],
+                    'ownerName': p.get('ownerName'),
+                    'pickupDriverId': p['pickupDriverId'],
+                    'size': p['size']
+                }
+                result.append(item)
+            
+            return result
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
         return []
+    finally:
+        conn.close()
 
 # --- 주소 처리 함수들 ---
 def address_to_coordinates(address):
@@ -179,13 +321,13 @@ def webhook_new_pickup():
         if not parcel_id:
             return jsonify({"error": "parcelId is required"}), 400
         
-        # 백엔드에서 수거 정보 가져오기
-        parcel = get_parcel_from_backend(parcel_id)
+        # DB에서 수거 정보 가져오기
+        parcel = get_parcel_from_db(parcel_id)
         if not parcel:
             return jsonify({"error": "Parcel not found"}), 404
         
         # 이미 기사 할당되었는지 확인
-        if parcel.get('driverId'):
+        if parcel.get('driverId') or parcel.get('pickupDriverId'):
             return jsonify({"status": "already_processed"}), 200
         
         # 주소로 좌표 변환
@@ -211,8 +353,8 @@ def webhook_new_pickup():
                 "message": f"No driver for district {district}"
             }), 500
         
-        # 백엔드에 기사 할당 요청
-        if assign_driver_to_parcel(parcel_id, driver_id):
+        # DB에 기사 할당
+        if assign_driver_to_parcel_in_db(parcel_id, driver_id):
             return jsonify({
                 "status": "success",
                 "parcelId": parcel_id,
@@ -251,8 +393,8 @@ def get_next_destination(driver_id):
                 "current_time": current_time.strftime("%H:%M")
             }), 200
             
-        # 백엔드에서 기사의 미완료 수거 목록 가져오기
-        parcels = get_driver_parcels(driver_id)
+        # DB에서 기사의 미완료 수거 목록 가져오기
+        parcels = get_driver_parcels_from_db(driver_id)
         pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
         
         if not pending_pickups:
@@ -375,8 +517,8 @@ def complete_pickup():
         if not parcel_id:
             return jsonify({"error": "parcelId is required"}), 400
         
-        # 백엔드에 완료 요청
-        if complete_parcel(parcel_id):
+        # DB에서 완료 처리
+        if complete_parcel_in_db(parcel_id):
             return jsonify({"status": "success"}), 200
         else:
             return jsonify({"error": "Failed to complete pickup"}), 500
@@ -397,25 +539,52 @@ def check_all_completed():
         total_pending = 0
         total_completed = 0
         
-        for driver_id in all_drivers:
-            parcels = get_driver_parcels(driver_id)
-            # 오늘 할당된 수거만 체크
-            today_parcels = [p for p in parcels 
-                           if p.get('assignedAt', '').startswith(today)]
-            
-            pending = [p for p in today_parcels if p['status'] == 'PENDING']
-            completed = [p for p in today_parcels if p['status'] == 'COMPLETED']
-            
-            total_pending += len(pending)
-            total_completed += len(completed)
-            
-            if pending:  # 아직 미완료 수거가 있음
-                return jsonify({
-                    "completed": False, 
-                    "remaining": total_pending,
-                    "completed_count": total_completed,
-                    "driver_status": f"Driver {driver_id} has {len(pending)} pending"
-                }), 200
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                # 오늘 할당된 미완료 수거 확인
+                sql_pending = """
+                SELECT pickupDriverId, COUNT(*) as pending_count
+                FROM Parcel
+                WHERE status = 'PICKUP_PENDING' 
+                AND DATE(createdAt) = CURDATE()
+                AND isDeleted = 0
+                GROUP BY pickupDriverId
+                """
+                cursor.execute(sql_pending)
+                pending_results = cursor.fetchall()
+                
+                # 오늘 완료된 수거 확인
+                sql_completed = """
+                SELECT COUNT(*) as completed_count
+                FROM Parcel
+                WHERE status = 'PICKUP_COMPLETED'
+                AND DATE(pickupCompletedAt) = CURDATE()
+                AND isDeleted = 0
+                """
+                cursor.execute(sql_completed)
+                completed_result = cursor.fetchone()
+                
+                # 결과 처리
+                if pending_results:
+                    for result in pending_results:
+                        driver_id = result['pickupDriverId']
+                        pending_count = result['pending_count']
+                        total_pending += pending_count
+                        
+                        if pending_count > 0:
+                            return jsonify({
+                                "completed": False, 
+                                "remaining": total_pending,
+                                "completed_count": completed_result['completed_count'] if completed_result else 0,
+                                "driver_status": f"Driver {driver_id} has {pending_count} pending"
+                            }), 200
+                
+                # 모든 수거가 완료됨
+                total_completed = completed_result['completed_count'] if completed_result else 0
+                
+        finally:
+            conn.close()
         
         # 모든 수거가 완료됨
         if total_completed > 0:  # 오늘 수거한 게 있을 때만
@@ -453,6 +622,27 @@ def check_all_completed():
 @app.route('/api/pickup/status')
 def status():
     return jsonify({"status": "healthy"})
+
+# 디버깅용 엔드포인트 - DB 직접 확인
+@app.route('/api/debug/db-check')
+def check_db_connection():
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) as count FROM Parcel")
+            result = cursor.fetchone()
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "connection": "ok",
+            "total_parcels": result['count']
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"DB connection failed: {str(e)}"
+        }), 500
 
 # --- 메인 실행 ---
 if __name__ == "__main__":
