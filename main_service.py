@@ -590,8 +590,8 @@ def check_all_completed():
         if total_completed > 0:  # 오늘 수거한 게 있을 때만
             try:
                 # 배달로 자동 전환
-                import_response = requests.post("http://localhost:5002/api/delivery/import")
-                assign_response = requests.post("http://localhost:5002/api/delivery/assign")
+                import_response = requests.post("http://delivery-service:5000/api/delivery/import")
+                assign_response = requests.post("http://delivery-service:5000/api/delivery/assign")
                 
                 return jsonify({
                     "completed": True,
