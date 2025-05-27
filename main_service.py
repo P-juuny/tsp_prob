@@ -151,7 +151,7 @@ def get_driver_parcels_from_db(driver_id):
                    'status': status,
                    'recipientAddr': p['recipientAddr'],
                    'productName': p['productName'],
-                   'completedAt': completed_at,
+                   'pickupCompletedAt': completed_at,
                    'assignedAt': created_at,
                    'ownerId': p['ownerId'],
                    'ownerName': p.get('ownerName'),
@@ -285,7 +285,7 @@ def get_completed_pickups_today_from_db():
                    'status': 'COMPLETED',
                    'recipientAddr': p['recipientAddr'],
                    'productName': p['productName'],
-                   'completedAt': completed_at,
+                   'pickupCompletedAt': completed_at,
                    'assignedAt': created_at,
                    'ownerId': p['ownerId'],
                    'ownerName': p.get('ownerName'),
@@ -500,11 +500,11 @@ def get_next_destination():
        today = datetime.now(KST).strftime('%Y-%m-%d')
        completed_today = [p for p in parcels 
                         if p['status'] == 'COMPLETED' 
-                        and p.get('completedAt', '').startswith(today)]
+                        and p.get('pickupCompletedAt', '').startswith(today)]
        
        if completed_today:
            last_completed = sorted(completed_today, 
-                                 key=lambda x: x['completedAt'], 
+                                 key=lambda x: x['pickupCompletedAt'], 
                                  reverse=True)[0]
            actual_address = last_completed['recipientAddr']
            lat, lon = address_to_coordinates(actual_address)
