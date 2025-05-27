@@ -604,95 +604,103 @@ def complete_pickup():
 
 @app.route('/api/pickup/all-completed', methods=['GET'])
 def check_all_completed():
-   """모든 수거가 완료됐는지 확인하고 자동으로 배달 전환"""
-   try:
-       # 오늘 날짜
-       today = datetime.now(KST).strftime('%Y-%m-%d')
-       
-       # 모든 기사(1-5) 체크
-       all_drivers = [1, 2, 3, 4, 5]
-       total_pending = 0
-       total_completed = 0
-       
-       conn = get_db_connection()
-       try:
-           with conn.cursor() as cursor:
-               # 오늘 처리할 미완료 수거 확인
-               sql_pending = """
-               SELECT pickupDriverId, COUNT(*) as pending_count
-               FROM Parcel
-               WHERE status = 'PICKUP_PENDING' 
-               AND (pickupScheduledDate IS NULL OR DATE(pickupScheduledDate) <= CURDATE())
-               AND isDeleted = 0
-               GROUP BY pickupDriverId
-               """
-               cursor.execute(sql_pending)
-               pending_results = cursor.fetchall()
-               
-               # 오늘 완료된 수거 확인
-               sql_completed = """
-               SELECT COUNT(*) as completed_count
-               FROM Parcel
-               WHERE status = 'PICKUP_COMPLETED'
-               AND DATE(pickupCompletedAt) = CURDATE()
-               AND isDeleted = 0
-               """
-               cursor.execute(sql_completed)
-               completed_result = cursor.fetchone()
-               
-               # 결과 처리
-               if pending_results:
-                   for result in pending_results:
-                       driver_id = result['pickupDriverId']
-                       pending_count = result['pending_count']
-                       total_pending += pending_count
-                       
-                       if pending_count > 0:
-                           return jsonify({
-                               "completed": False, 
-                               "remaining": total_pending,
-                               "completed_count": completed_result['completed_count'] if completed_result else 0,
-                               "driver_status": f"Driver {driver_id} has {pending_count} pending"
-                           }), 200
-               
-               # 모든 수거가 완료됨
-               total_completed = completed_result['completed_count'] if completed_result else 0
-               
-       finally:
-           conn.close()
-       
-       # 모든 수거가 완료됨
-       if total_completed > 0:  # 오늘 수거한 게 있을 때만
-           try:
-               # 배달로 자동 전환
-               import_response = requests.post("http://delivery-service:5000/api/delivery/import")
-               assign_response = requests.post("http://delivery-service:5000/api/delivery/assign")
-               
-               return jsonify({
-                   "completed": True,
-                   "message": "All pickups completed and converted to delivery",
-                   "total_converted": total_completed,
-                   "import_status": import_response.status_code,
-                   "assign_status": assign_response.status_code
-               }), 200
-               
-           except Exception as e:
-               logging.error(f"Error converting to delivery: {e}")
-               return jsonify({
-                   "completed": True,
-                   "error": "Failed to convert to delivery",
-                   "details": str(e)
-               }), 500
-       else:
-           return jsonify({
-               "completed": True,
-               "message": "No pickups today",
-               "total_completed": 0
-           }), 200
-           
-   except Exception as e:
-       logging.error(f"Error checking completion: {e}")
-       return jsonify({"error": str(e)}), 500
+    """모든 수거가 완료됐는지 확인하고 자동으로 배달 전환"""
+    try:
+        # 오늘 날짜
+        today = datetime.now(KST).strftime('%Y-%m-%d')
+        
+        # 모든 기사(1-5) 체크
+        all_drivers = [1, 2, 3, 4, 5]
+        total_pending = 0
+        total_completed = 0
+        first_pending_driver = None
+        first_pending_count = 0
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                # 오늘 처리할 미완료 수거 확인
+                sql_pending = """
+                SELECT pickupDriverId, COUNT(*) as pending_count
+                FROM Parcel
+                WHERE status = 'PICKUP_PENDING' 
+                AND (pickupScheduledDate IS NULL OR DATE(pickupScheduledDate) <= CURDATE())
+                AND isDeleted = 0
+                GROUP BY pickupDriverId
+                """
+                cursor.execute(sql_pending)
+                pending_results = cursor.fetchall()
+                
+                # 오늘 완료된 수거 확인
+                sql_completed = """
+                SELECT COUNT(*) as completed_count
+                FROM Parcel
+                WHERE status = 'PICKUP_COMPLETED'
+                AND DATE(pickupCompletedAt) = CURDATE()
+                AND isDeleted = 0
+                """
+                cursor.execute(sql_completed)
+                completed_result = cursor.fetchone()
+                
+                # 🔧 수정: 모든 결과를 먼저 집계
+                if pending_results:
+                    for result in pending_results:
+                        driver_id = result['pickupDriverId']
+                        pending_count = result['pending_count']
+                        total_pending += pending_count
+                        
+                        # 첫 번째 미완료 기사 정보 저장
+                        if pending_count > 0 and first_pending_driver is None:
+                            first_pending_driver = driver_id
+                            first_pending_count = pending_count
+                
+                # 완료된 수거 개수
+                total_completed = completed_result['completed_count'] if completed_result else 0
+                
+        finally:
+            conn.close()
+        
+        # 🔧 수정: 미완료가 있으면 집계 완료 후 응답
+        if total_pending > 0:
+            return jsonify({
+                "completed": False, 
+                "remaining": total_pending,
+                "completed_count": total_completed,
+                "driver_status": f"Driver {first_pending_driver} has {first_pending_count} pending"
+            }), 200
+        
+        # 모든 수거가 완료됨
+        if total_completed > 0:  # 오늘 수거한 게 있을 때만
+            try:
+                # 배달로 자동 전환
+                import_response = requests.post("http://delivery-service:5000/api/delivery/import")
+                assign_response = requests.post("http://delivery-service:5000/api/delivery/assign")
+                
+                return jsonify({
+                    "completed": True,
+                    "message": "All pickups completed and converted to delivery",
+                    "total_converted": total_completed,
+                    "import_status": import_response.status_code,
+                    "assign_status": assign_response.status_code
+                }), 200
+                
+            except Exception as e:
+                logging.error(f"Error converting to delivery: {e}")
+                return jsonify({
+                    "completed": True,
+                    "error": "Failed to convert to delivery",
+                    "details": str(e)
+                }), 500
+        else:
+            return jsonify({
+                "completed": True,
+                "message": "No pickups today",
+                "total_completed": 0
+            }), 200
+            
+    except Exception as e:
+        logging.error(f"Error checking completion: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/pickup/status')
 def status():
