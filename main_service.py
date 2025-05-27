@@ -8,6 +8,9 @@ from datetime import datetime, timedelta, time as datetime_time
 from flask import Flask, request, jsonify
 import pytz
 
+# 인증 관련 추가
+from auth import auth_required, get_current_driver
+
 # Valhalla 관련 함수만 임포트
 from get_valhalla_matrix import get_time_distance_matrix
 from get_valhalla_route import get_turn_by_turn_route
@@ -444,13 +447,18 @@ def webhook_new_pickup():
        logging.error(f"Error processing webhook: {e}", exc_info=True)
        return jsonify({"error": "Internal server error"}), 500
 
-@app.route('/api/pickup/next/<int:driver_id>', methods=['GET'])
-def get_next_destination(driver_id):
-   """기사의 다음 최적 목적지 계산"""
+@app.route('/api/pickup/next', methods=['GET'])
+@auth_required
+def get_next_destination():
+   """현재 로그인한 기사의 다음 최적 목적지 계산"""
    try:
-       # driver_id는 1-5 중 하나 (고정)
+       # 현재 로그인한 기사 정보 가져오기
+       driver_info = get_current_driver()
+       driver_id = driver_info['id']
+       
+       # driver_id는 1-5 중 하나여야 함 (수거 기사)
        if driver_id not in [1, 2, 3, 4, 5]:
-           return jsonify({"error": "Invalid driver_id"}), 400
+           return jsonify({"error": "수거 기사만 접근 가능합니다"}), 403
        
        # 시간 체크 추가
        current_time = datetime.now(KST).time()
@@ -583,14 +591,24 @@ def get_next_destination(driver_id):
        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/pickup/complete', methods=['POST'])
+@auth_required
 def complete_pickup():
    """수거 완료 처리"""
    try:
+       # 현재 로그인한 기사 확인
+       driver_info = get_current_driver()
+       driver_id = driver_info['id']
+       
        data = request.json
        parcel_id = data.get('parcelId')
        
        if not parcel_id:
            return jsonify({"error": "parcelId is required"}), 400
+       
+       # 해당 소포가 현재 기사에게 할당되었는지 확인
+       parcel = get_parcel_from_db(parcel_id)
+       if not parcel or parcel.get('pickupDriverId') != driver_id:
+           return jsonify({"error": "권한이 없습니다"}), 403
        
        # DB에서 완료 처리
        if complete_parcel_in_db(parcel_id):
