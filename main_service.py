@@ -489,33 +489,30 @@ def get_next_destination():
                "current_time": current_time.strftime("%H:%M")
            }), 200
            
-       # DB에서 기사의 미완료 수거 목록 가져오기 (오늘 처리할 것만)
+       # DB에서 기사의 소포 목록 가져오기
        parcels = get_driver_parcels_from_db(driver_id)
        pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
        
+       # 🔧 현재 위치 계산 (pending 여부와 상관없이 먼저 계산)
+       current_location = HUB_LOCATION  # 기본값
+       
+       # 오늘 완료된 수거가 있으면 마지막 완료 위치가 현재 위치
+       today = datetime.now(KST).strftime('%Y-%m-%d')
+       completed_today = [p for p in parcels 
+                        if p['status'] == 'COMPLETED' 
+                        and p.get('completedAt', '').startswith(today)]
+       
+       if completed_today:
+           last_completed = sorted(completed_today, 
+                                 key=lambda x: x['completedAt'], 
+                                 reverse=True)[0]
+           actual_address = last_completed['recipientAddr']
+           lat, lon = address_to_coordinates(actual_address)
+           current_location = {"lat": lat, "lon": lon}
+           logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
+       
+       # 미완료 수거가 없으면 허브로 복귀
        if not pending_pickups:
-           # 모든 수거 완료, 허브로 복귀
-           today = datetime.now(KST).strftime('%Y-%m-%d')
-           completed_today = [p for p in parcels 
-                            if p['status'] == 'COMPLETED' 
-                            and p.get('completedAt', '').startswith(today)]
-           
-           if completed_today:
-               # 마지막 완료 위치에서 허브로 가는 경로 계산
-               last_completed = sorted(completed_today, 
-                                     key=lambda x: x['completedAt'], 
-                                     reverse=True)[0]
-               
-               # 실제 주소로 좌표 변환 (정확한 지오코딩)
-               actual_address = last_completed['recipientAddr']
-               lat, lon = address_to_coordinates(actual_address)
-               current_location = {"lat": lat, "lon": lon}
-               
-               logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
-               logging.info(f"허브 위치: {HUB_LOCATION}")
-           else:
-               current_location = HUB_LOCATION
-           
            route_info = get_turn_by_turn_route(
                current_location,
                HUB_LOCATION,
@@ -528,26 +525,11 @@ def get_next_destination():
                "route": route_info,
                "is_last": True,
                "remaining_pickups": 0,
-               "current_location": current_location,  # 디버깅용 추가
+               "current_location": current_location,
                "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
            }), 200
        
-       # 현재 위치 결정
-       today = datetime.now(KST).strftime('%Y-%m-%d')
-       completed_today = [p for p in parcels 
-                        if p['status'] == 'COMPLETED' 
-                        and p.get('completedAt', '').startswith(today)]
-       
-       if completed_today:
-           last_completed = sorted(completed_today, 
-                                 key=lambda x: x['completedAt'], 
-                                 reverse=True)[0]
-           lat, lon = address_to_coordinates(last_completed['recipientAddr'])
-           current_location = {"lat": lat, "lon": lon}
-       else:
-           current_location = HUB_LOCATION
-       
-       # TSP 계산을 위한 위치 목록
+       # 미완료 수거가 있으면 TSP 계산
        locations = [current_location]
        for pickup in pending_pickups:
            lat, lon = address_to_coordinates(pickup['recipientAddr'])
@@ -611,6 +593,7 @@ def get_next_destination():
    except Exception as e:
        logging.error(f"Error getting next destination: {e}", exc_info=True)
        return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route('/api/pickup/complete', methods=['POST'])
 @auth_required
