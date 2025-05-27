@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir -r requirements_pickup.txt
 COPY main_service.py /app/
 COPY get_valhalla_matrix.py /app/
 COPY get_valhalla_route.py /app/
+COPY auth.py /app/
 
 # 포트 노출
 EXPOSE 5000
