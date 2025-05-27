@@ -32,6 +32,9 @@ LKH_SERVICE_URL = os.environ.get("LKH_SERVICE_URL", "http://lkh:5001/solve")
 VALHALLA_HOST = os.environ.get("VALHALLA_HOST", "traffic-proxy")
 VALHALLA_PORT = os.environ.get("VALHALLA_PORT", "8003")
 
+# 기사별 허브 도착 상태 (메모리 저장)
+driver_hub_status = {}  # {driver_id: True/False}
+
 # 한국 시간대 설정
 KST = pytz.timezone('Asia/Seoul')
 PICKUP_START_TIME = datetime_time(7, 0)  # 오전 7시
@@ -460,10 +463,47 @@ def webhook_new_pickup():
        logging.error(f"Error processing webhook: {e}", exc_info=True)
        return jsonify({"error": "Internal server error"}), 500
 
+@app.route('/api/pickup/hub-arrived', methods=['POST'])
+@auth_required
+def hub_arrived():
+    """허브 도착 완료 처리 (간단 버전)"""
+    try:
+        # 현재 로그인한 기사 확인
+        driver_info = get_current_driver()
+        driver_id = driver_info['id']
+        
+        # driver_id는 1-5 중 하나여야 함 (수거 기사)
+        if driver_id not in [1, 2, 3, 4, 5]:
+            return jsonify({"error": "수거 기사만 접근 가능합니다"}), 403
+        
+        # 현재 할당된 수거가 없는지 확인
+        parcels = get_driver_parcels_from_db(driver_id)
+        pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
+        
+        if pending_pickups:
+            return jsonify({
+                "error": "아직 완료하지 않은 수거가 있습니다",
+                "remaining_pickups": len(pending_pickups)
+            }), 400
+        
+        # 🔧 메모리에 허브 도착 상태 저장
+        driver_hub_status[driver_id] = True
+        
+        return jsonify({
+            "status": "success",
+            "message": "허브 도착이 완료되었습니다. 수고하셨습니다!",
+            "location": HUB_LOCATION,
+            "arrival_time": datetime.now(KST).strftime("%H:%M")
+        }), 200
+            
+    except Exception as e:
+        logging.error(f"Error processing hub arrival: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 @app.route('/api/pickup/next', methods=['GET'])
 @auth_required
 def get_next_destination():
-   """현재 로그인한 기사의 다음 최적 목적지 계산"""
+   """현재 로그인한 기사의 다음 최적 목적지 계산 (수정된 버전)"""
    try:
        # 현재 로그인한 기사 정보 가져오기
        driver_info = get_current_driver()
@@ -493,27 +533,42 @@ def get_next_destination():
        parcels = get_driver_parcels_from_db(driver_id)
        pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
        
-       # 🔧 현재 위치 계산 (pending 여부와 상관없이 먼저 계산)
+       # 🔧 현재 위치 계산 (개선된 버전)
        current_location = HUB_LOCATION  # 기본값
        
-       # 오늘 완료된 수거가 있으면 마지막 완료 위치가 현재 위치
-       today = datetime.now(KST).strftime('%Y-%m-%d')
-       completed_today = [p for p in parcels 
-                        if p['status'] == 'COMPLETED' 
-                        and p.get('pickupCompletedAt', '').startswith(today)]
-       
-       if completed_today:
-           last_completed = sorted(completed_today, 
-                                 key=lambda x: x['pickupCompletedAt'], 
-                                 reverse=True)[0]
-           actual_address = last_completed['recipientAddr']
-           lat, lon = address_to_coordinates(actual_address)
-           current_location = {"lat": lat, "lon": lon}
-           logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
+       # 1. 먼저 허브 도착 상태 확인
+       if driver_hub_status.get(driver_id, False):
+           current_location = HUB_LOCATION
+           logging.info(f"기사 {driver_id} 허브 도착 완료 상태")
+       else:
+           # 2. 오늘 완료된 수거가 있으면 마지막 완료 위치가 현재 위치
+           today = datetime.now(KST).strftime('%Y-%m-%d')
+           completed_today = [p for p in parcels 
+                            if p['status'] == 'COMPLETED' 
+                            and p.get('pickupCompletedAt', '').startswith(today)]
+           
+           if completed_today:
+               last_completed = sorted(completed_today, 
+                                     key=lambda x: x['pickupCompletedAt'], 
+                                     reverse=True)[0]
+               actual_address = last_completed['recipientAddr']
+               lat, lon = address_to_coordinates(actual_address)
+               current_location = {"lat": lat, "lon": lon}
+               logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
        
        # 미완료 수거가 없을 때
        if not pending_pickups:
            current_time = datetime.now(KST).time()
+           
+           # 🔧 이미 허브에 있다면
+           if driver_hub_status.get(driver_id, False):
+               return jsonify({
+                   "status": "at_hub",
+                   "message": "허브에 도착했습니다. 수고하셨습니다!",
+                   "current_location": current_location,
+                   "remaining_pickups": 0,
+                   "is_last": True
+               }), 200
            
            # 🔧 12시 이전이면 "대기" 상태
            if current_time < PICKUP_CUTOFF_TIME:  # 정오 12시 이전
@@ -536,7 +591,8 @@ def get_next_destination():
                )
                
                return jsonify({
-                   "status": "success",
+                   "status": "return_to_hub",
+                   "message": "모든 수거가 완료되었습니다. 허브로 복귀해주세요.",
                    "next_destination": HUB_LOCATION,
                    "route": route_info,
                    "is_last": True,
@@ -544,6 +600,11 @@ def get_next_destination():
                    "current_location": current_location,
                    "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
                }), 200
+       
+       # 🔧 새로운 수거가 시작되면 허브 상태 리셋
+       if pending_pickups and driver_hub_status.get(driver_id, False):
+           driver_hub_status[driver_id] = False
+           logging.info(f"기사 {driver_id} 새로운 수거 시작으로 허브 상태 리셋")
        
        # 미완료 수거가 있으면 TSP 계산
        locations = [current_location]
