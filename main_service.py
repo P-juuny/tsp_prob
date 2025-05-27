@@ -301,9 +301,9 @@ def get_completed_pickups_today_from_db():
    finally:
        conn.close()
 
-# --- 주소 처리 함수들 ---
+# --- 주소 처리 함수들 (수정됨) ---
 def address_to_coordinates(address):
-   """주소를 위도/경도로 변환"""
+   """주소를 위도/경도로 변환 (개선된 버전)"""
    try:
        url = f"http://{VALHALLA_HOST}:{VALHALLA_PORT}/search"
        params = {
@@ -311,21 +311,34 @@ def address_to_coordinates(address):
            "focus.point.lat": 37.5665,
            "focus.point.lon": 126.9780,
            "boundary.country": "KR",
-           "size": 1
+           "size": 5  # 더 많은 결과 요청
        }
        
-       response = requests.get(url, params=params, timeout=5)
+       response = requests.get(url, params=params, timeout=10)
        
        if response.status_code == 200:
            data = response.json()
            if data.get("features") and len(data["features"]) > 0:
+               # 가장 정확한 매치 선택
+               for feature in data["features"]:
+                   coords = feature["geometry"]["coordinates"]
+                   confidence = feature.get("properties", {}).get("confidence", 0)
+                   
+                   # 최소 신뢰도 확인
+                   if confidence > 0.7:
+                       logging.info(f"지오코딩 성공: {address} -> ({coords[1]}, {coords[0]}) 신뢰도: {confidence}")
+                       return coords[1], coords[0]
+               
+               # 신뢰도가 낮더라도 첫 번째 결과 사용
                coords = data["features"][0]["geometry"]["coordinates"]
+               logging.info(f"지오코딩 (낮은 신뢰도): {address} -> ({coords[1]}, {coords[0]})")
                return coords[1], coords[0]
        
+       logging.warning(f"지오코딩 실패, 기본 좌표 사용: {address}")
        return get_default_coordinates(address)
            
    except Exception as e:
-       logging.error(f"Error geocoding address: {e}")
+       logging.error(f"지오코딩 오류: {e}")
        return get_default_coordinates(address)
 
 def get_default_coordinates(address):
@@ -488,11 +501,18 @@ def get_next_destination():
                             and p.get('completedAt', '').startswith(today)]
            
            if completed_today:
+               # 마지막 완료 위치에서 허브로 가는 경로 계산
                last_completed = sorted(completed_today, 
                                      key=lambda x: x['completedAt'], 
                                      reverse=True)[0]
-               lat, lon = address_to_coordinates(last_completed['recipientAddr'])
+               
+               # 실제 주소로 좌표 변환 (정확한 지오코딩)
+               actual_address = last_completed['recipientAddr']
+               lat, lon = address_to_coordinates(actual_address)
                current_location = {"lat": lat, "lon": lon}
+               
+               logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
+               logging.info(f"허브 위치: {HUB_LOCATION}")
            else:
                current_location = HUB_LOCATION
            
@@ -507,7 +527,9 @@ def get_next_destination():
                "next_destination": HUB_LOCATION,
                "route": route_info,
                "is_last": True,
-               "remaining_pickups": 0
+               "remaining_pickups": 0,
+               "current_location": current_location,  # 디버깅용 추가
+               "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
            }), 200
        
        # 현재 위치 결정
