@@ -511,23 +511,39 @@ def get_next_destination():
            current_location = {"lat": lat, "lon": lon}
            logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
        
-       # 미완료 수거가 없으면 허브로 복귀
+       # 미완료 수거가 없을 때
        if not pending_pickups:
-           route_info = get_turn_by_turn_route(
-               current_location,
-               HUB_LOCATION,
-               costing=COSTING_MODEL
-           )
+           current_time = datetime.now(KST).time()
            
-           return jsonify({
-               "status": "success",
-               "next_destination": HUB_LOCATION,
-               "route": route_info,
-               "is_last": True,
-               "remaining_pickups": 0,
-               "current_location": current_location,
-               "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
-           }), 200
+           # 🔧 12시 이전이면 "대기" 상태
+           if current_time < PICKUP_CUTOFF_TIME:  # 정오 12시 이전
+               return jsonify({
+                   "status": "waiting_for_orders",
+                   "message": f"현재 할당된 수거가 없습니다. 신규 요청을 대기 중입니다. (마감: 12:00)",
+                   "current_time": current_time.strftime("%H:%M"),
+                   "cutoff_time": "12:00",
+                   "current_location": current_location,
+                   "is_last": False,
+                   "remaining_pickups": 0
+               }), 200
+           
+           # 🔧 12시 이후면 허브 복귀
+           else:
+               route_info = get_turn_by_turn_route(
+                   current_location,
+                   HUB_LOCATION,
+                   costing=COSTING_MODEL
+               )
+               
+               return jsonify({
+                   "status": "success",
+                   "next_destination": HUB_LOCATION,
+                   "route": route_info,
+                   "is_last": True,
+                   "remaining_pickups": 0,
+                   "current_location": current_location,
+                   "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
+               }), 200
        
        # 미완료 수거가 있으면 TSP 계산
        locations = [current_location]
@@ -593,8 +609,7 @@ def get_next_destination():
    except Exception as e:
        logging.error(f"Error getting next destination: {e}", exc_info=True)
        return jsonify({"error": "Internal server error"}), 500
-
-
+       
 @app.route('/api/pickup/complete', methods=['POST'])
 @auth_required
 def complete_pickup():
