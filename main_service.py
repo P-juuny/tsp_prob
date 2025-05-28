@@ -381,7 +381,7 @@ def get_default_coordinates(address):
    
    return (37.5665, 126.9780)
 
-# 🔧 새로 추가: waypoints 추출 함수
+# 🔧 수정된 waypoints 추출 함수
 def extract_waypoints_from_route(route_info):
     """Valhalla route 응답에서 waypoints와 coordinates 추출"""
     waypoints = []
@@ -404,8 +404,14 @@ def extract_waypoints_from_route(route_info):
             try:
                 # polyline 디코딩: shape -> 좌표 배열
                 decoded_coords = polyline.decode(leg['shape'])
-                coordinates = [{"lat": lat, "lon": lon} for lat, lon in decoded_coords]
+                # 🔧 수정: 좌표를 정상적으로 저장
+                coordinates = [{"lat": float(lat), "lon": float(lon)} for lat, lon in decoded_coords]
                 logging.info(f"Decoded {len(coordinates)} coordinates from shape")
+                
+                # 🔧 디버깅: 첫 번째 좌표 확인
+                if coordinates:
+                    logging.info(f"First coordinate: lat={coordinates[0]['lat']}, lon={coordinates[0]['lon']}")
+                    
             except Exception as e:
                 logging.error(f"Shape decoding error: {e}")
                 coordinates = []
@@ -425,8 +431,8 @@ def extract_waypoints_from_route(route_info):
                 lon = coordinates[begin_idx]['lon']
             
             waypoint = {
-                "lat": lat,
-                "lon": lon,
+                "lat": float(lat),  # 🔧 수정: float 변환 명시
+                "lon": float(lon),  # 🔧 수정: float 변환 명시
                 "name": street_name,
                 "instruction": instruction
             }
@@ -434,10 +440,15 @@ def extract_waypoints_from_route(route_info):
         
         logging.info(f"Extracted {len(waypoints)} waypoints and {len(coordinates)} coordinates")
         
+        # 🔧 디버깅: waypoints의 좌표 확인
+        if waypoints:
+            logging.info(f"First waypoint: lat={waypoints[0]['lat']}, lon={waypoints[0]['lon']}")
+        
     except Exception as e:
         logging.error(f"Error extracting waypoints: {e}")
     
     return waypoints, coordinates
+    
 # --- API 엔드포인트 ---
 
 @app.route('/api/pickup/webhook', methods=['POST'])
