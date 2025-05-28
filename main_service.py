@@ -7,6 +7,7 @@ import pymysql
 from datetime import datetime, timedelta, time as datetime_time
 from flask import Flask, request, jsonify
 import pytz
+import polyline
 
 # 인증 관련 추가
 from auth import auth_required, get_current_driver
@@ -382,49 +383,61 @@ def get_default_coordinates(address):
 
 # 🔧 새로 추가: waypoints 추출 함수
 def extract_waypoints_from_route(route_info):
-    """Valhalla route 응답에서 waypoints 추출"""
+    """Valhalla route 응답에서 waypoints와 coordinates 추출"""
     waypoints = []
+    coordinates = []
     
     try:
         if not route_info or 'trip' not in route_info:
-            return waypoints
+            return waypoints, coordinates
         
         trip = route_info['trip']
         if 'legs' not in trip or not trip['legs']:
-            return waypoints
+            return waypoints, coordinates
         
-        # 첫 번째 leg의 maneuvers에서 waypoints 추출
+        # 첫 번째 leg의 정보 추출
         leg = trip['legs'][0]
         maneuvers = leg.get('maneuvers', [])
         
-        for i, maneuver in enumerate(maneuvers):
-            # 각 maneuver의 시작 지점을 waypoint로 추가
-            lat = maneuver.get('begin_shape_index_lat')  # 실제 필드명은 다를 수 있음
-            lon = maneuver.get('begin_shape_index_lon')
-            
-            # shape 데이터에서 좌표 추출 (polyline decode 필요)
-            if 'shape' in leg and leg['shape']:
-                # 간단화: maneuver 순서에 따라 대략적인 좌표 생성
-                # 실제로는 polyline decoding이 필요하지만 여기서는 단순화
-                instruction = maneuver.get('instruction', f'구간 {i+1}')
-                street_names = maneuver.get('street_names', [])
-                street_name = street_names[0] if street_names else f'구간{i+1}'
-                
-                waypoint = {
-                    "lat": lat if lat else 0,  # 실제 좌표는 polyline에서 추출 필요
-                    "lon": lon if lon else 0,
-                    "name": street_name,
-                    "instruction": instruction
-                }
-                waypoints.append(waypoint)
+        # Shape 디코딩해서 전체 좌표 배열 생성
+        if 'shape' in leg and leg['shape']:
+            try:
+                # polyline 디코딩: shape -> 좌표 배열
+                decoded_coords = polyline.decode(leg['shape'])
+                coordinates = [{"lat": lat, "lon": lon} for lat, lon in decoded_coords]
+                logging.info(f"Decoded {len(coordinates)} coordinates from shape")
+            except Exception as e:
+                logging.error(f"Shape decoding error: {e}")
+                coordinates = []
         
-        logging.info(f"Extracted {len(waypoints)} waypoints from route")
+        # Maneuvers에서 waypoints 추출 (도로명, 안내문)
+        for i, maneuver in enumerate(maneuvers):
+            instruction = maneuver.get('instruction', f'구간 {i+1}')
+            street_names = maneuver.get('street_names', [])
+            street_name = street_names[0] if street_names else f'구간{i+1}'
+            
+            # Shape 인덱스로 실제 좌표 찾기
+            begin_idx = maneuver.get('begin_shape_index', 0)
+            lat, lon = 0, 0
+            
+            if coordinates and begin_idx < len(coordinates):
+                lat = coordinates[begin_idx]['lat']
+                lon = coordinates[begin_idx]['lon']
+            
+            waypoint = {
+                "lat": lat,
+                "lon": lon,
+                "name": street_name,
+                "instruction": instruction
+            }
+            waypoints.append(waypoint)
+        
+        logging.info(f"Extracted {len(waypoints)} waypoints and {len(coordinates)} coordinates")
         
     except Exception as e:
         logging.error(f"Error extracting waypoints: {e}")
     
-    return waypoints
-
+    return waypoints, coordinates
 # --- API 엔드포인트 ---
 
 @app.route('/api/pickup/webhook', methods=['POST'])
@@ -635,8 +648,8 @@ def get_next_destination():
                    costing=COSTING_MODEL
                )
                
-               # 🔧 waypoints 추출
-               waypoints = extract_waypoints_from_route(route_info)
+               # 🔧 waypoints 및 coordinates 추출
+               waypoints, coordinates = extract_waypoints_from_route(route_info)
                if not waypoints:
                    # 기본 waypoints (출발지 -> 목적지)
                    waypoints = [
@@ -653,10 +666,16 @@ def get_next_destination():
                            "instruction": "허브 도착"
                        }
                    ]
+                   # 기본 coordinates
+                   coordinates = [
+                       {"lat": current_location["lat"], "lon": current_location["lon"]},
+                       {"lat": HUB_LOCATION["lat"], "lon": HUB_LOCATION["lon"]}
+                   ]
                
-               # 🔧 route에 waypoints 추가
+               # 🔧 route에 waypoints와 coordinates 추가
                if route_info and 'trip' in route_info:
                    route_info['waypoints'] = waypoints
+                   route_info['coordinates'] = coordinates
                
                return jsonify({
                    "status": "return_to_hub",
@@ -711,8 +730,8 @@ def get_next_destination():
                            costing=COSTING_MODEL
                        )
                        
-                       # 🔧 waypoints 추출 및 추가
-                       waypoints = extract_waypoints_from_route(route_info)
+                       # 🔧 waypoints 및 coordinates 추출
+                       waypoints, coordinates = extract_waypoints_from_route(route_info)
                        if not waypoints:
                            # 기본 waypoints
                            waypoints = [
@@ -729,10 +748,16 @@ def get_next_destination():
                                    "instruction": "목적지 도착"
                                }
                            ]
+                           # 기본 coordinates
+                           coordinates = [
+                               {"lat": current_location["lat"], "lon": current_location["lon"]},
+                               {"lat": next_location["lat"], "lon": next_location["lon"]}
+                           ]
                        
-                       # route에 waypoints 추가
+                       # route에 waypoints와 coordinates 추가
                        if route_info and 'trip' in route_info:
                            route_info['waypoints'] = waypoints
+                           route_info['coordinates'] = coordinates
                        
                        return jsonify({
                            "status": "success",
@@ -750,8 +775,8 @@ def get_next_destination():
            costing=COSTING_MODEL
        )
        
-       # 🔧 waypoints 추가 (fallback)
-       waypoints = extract_waypoints_from_route(route_info)
+       # 🔧 waypoints 및 coordinates 추출 (fallback)
+       waypoints, coordinates = extract_waypoints_from_route(route_info)
        if not waypoints:
            waypoints = [
                {
@@ -767,9 +792,15 @@ def get_next_destination():
                    "instruction": "도착"
                }
            ]
+           # 기본 coordinates
+           coordinates = [
+               {"lat": current_location["lat"], "lon": current_location["lon"]},
+               {"lat": next_location["lat"], "lon": next_location["lon"]}
+           ]
        
        if route_info and 'trip' in route_info:
            route_info['waypoints'] = waypoints
+           route_info['coordinates'] = coordinates
        
        return jsonify({
            "status": "success",
