@@ -404,45 +404,39 @@ def extract_waypoints_from_route(route_info):
             try:
                 # polyline 디코딩: shape -> 좌표 배열
                 decoded_coords = polyline.decode(leg['shape'])
-                # 🔧 수정: 좌표를 정상적으로 저장
-                coordinates = [{"lat": float(lat), "lon": float(lon)} for lat, lon in decoded_coords]
+                coordinates = [{"lat": lat, "lon": lon} for lat, lon in decoded_coords]
                 logging.info(f"Decoded {len(coordinates)} coordinates from shape")
-                
-                # 🔧 디버깅: 첫 번째 좌표 확인
-                if coordinates:
-                    logging.info(f"First coordinate: lat={coordinates[0]['lat']}, lon={coordinates[0]['lon']}")
-                    
             except Exception as e:
                 logging.error(f"Shape decoding error: {e}")
                 coordinates = []
         
-        # Maneuvers에서 waypoints 추출 (도로명, 안내문)
+        # 🔧 핵심 수정: maneuvers에서 waypoints 추출할 때 좌표 처리
         for i, maneuver in enumerate(maneuvers):
             instruction = maneuver.get('instruction', f'구간 {i+1}')
             street_names = maneuver.get('street_names', [])
             street_name = street_names[0] if street_names else f'구간{i+1}'
             
-            # Shape 인덱스로 실제 좌표 찾기
+            # 🔧 중요: begin_shape_index를 사용해서 실제 좌표 가져오기
             begin_idx = maneuver.get('begin_shape_index', 0)
-            lat, lon = 0, 0
             
             if coordinates and begin_idx < len(coordinates):
-                lat = coordinates[begin_idx]['lat']
-                lon = coordinates[begin_idx]['lon']
+                # 🔧 여기가 문제였음: 딕셔너리에서 값을 제대로 가져와야 함
+                lat = coordinates[begin_idx]["lat"]
+                lon = coordinates[begin_idx]["lon"]
+            else:
+                # 기본값
+                lat = 0.0
+                lon = 0.0
             
             waypoint = {
-                "lat": float(lat),  # 🔧 수정: float 변환 명시
-                "lon": float(lon),  # 🔧 수정: float 변환 명시
+                "lat": lat,
+                "lon": lon,
                 "name": street_name,
                 "instruction": instruction
             }
             waypoints.append(waypoint)
         
         logging.info(f"Extracted {len(waypoints)} waypoints and {len(coordinates)} coordinates")
-        
-        # 🔧 디버깅: waypoints의 좌표 확인
-        if waypoints:
-            logging.info(f"First waypoint: lat={waypoints[0]['lat']}, lon={waypoints[0]['lon']}")
         
     except Exception as e:
         logging.error(f"Error extracting waypoints: {e}")
