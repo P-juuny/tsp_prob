@@ -403,7 +403,7 @@ def extract_waypoints_from_route(route_info):
         if 'shape' in leg and leg['shape']:
             try:
                 # polyline 디코딩: shape -> 좌표 배열
-                decoded_coords = polyline.decode(leg['shape'])
+                decoded_coords = polyline.decode(leg['shape'], precision = 6)
                 coordinates = [{"lat": lat, "lon": lon} for lat, lon in decoded_coords]
                 logging.info(f"Decoded {len(coordinates)} coordinates from shape")
             except Exception as e:
