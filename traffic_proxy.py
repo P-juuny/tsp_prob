@@ -156,19 +156,43 @@ class TrafficProxy:
         return request_data
     
     def calculate_real_time(self, route_response):
-        """실제 교통 속도를 반영한 시간 재계산"""
+        """실제 교통 속도를 반영한 시간 재계산 - 상세 정보 보존"""
         if 'trip' not in route_response:
             return route_response
         
-        # 단순화: 전체 시간에 평균 속도 비율 적용
-        if traffic_data:
+        # 🔧 수정: legs와 maneuvers 정보를 보존하면서 시간만 조정
+        if traffic_data and 'legs' in route_response['trip']:
             avg_speed = sum(traffic_data.values()) / len(traffic_data)
+            
             if avg_speed < 50:  # 50km/h 이하면 시간 증가
                 factor = 50 / avg_speed
+                
+                # Trip summary 조정
                 if 'summary' in route_response['trip']:
                     original_time = route_response['trip']['summary'].get('time', 0)
                     route_response['trip']['summary']['time'] = original_time * factor
                     route_response['trip']['summary']['traffic_time'] = original_time * factor
+                
+                # 각 leg별로 시간 조정 (상세 정보는 보존)
+                for leg in route_response['trip']['legs']:
+                    if 'summary' in leg:
+                        leg_time = leg['summary'].get('time', 0)
+                        leg['summary']['time'] = leg_time * factor
+                    
+                    # 각 maneuver별로 시간 조정 (instruction은 보존)
+                    for maneuver in leg.get('maneuvers', []):
+                        maneuver_time = maneuver.get('time', 0)
+                        maneuver['time'] = maneuver_time * factor
+        else:
+            # 기존 로직 (legs가 없는 경우)
+            if traffic_data:
+                avg_speed = sum(traffic_data.values()) / len(traffic_data)
+                if avg_speed < 50:  # 50km/h 이하면 시간 증가
+                    factor = 50 / avg_speed
+                    if 'summary' in route_response['trip']:
+                        original_time = route_response['trip']['summary'].get('time', 0)
+                        route_response['trip']['summary']['time'] = original_time * factor
+                        route_response['trip']['summary']['traffic_time'] = original_time * factor
         
         return route_response
     
@@ -210,7 +234,7 @@ def status():
 
 @app.route('/route', methods=['POST'])
 def proxy_route():
-    """라우팅 요청 프록시"""
+    """라우팅 요청 프록시 - 상세 정보 보존"""
     try:
         # 원본 요청 받기
         original_request = request.json
@@ -228,17 +252,27 @@ def proxy_route():
         )
         
         if response.status_code == 200:
-            # 응답 수정
+            # 🔧 수정: 전체 응답 보존하면서 교통 정보만 추가
             result = response.json()
+            
+            # 기본 교통 정보 적용
             result = proxy.calculate_real_time(result)
             
             # 트래픽 정보 추가
             if 'trip' in result:
                 result['trip']['has_traffic'] = True
                 result['trip']['traffic_data_count'] = len(traffic_data)
+                
+                # 🔧 상세 정보 로깅
+                if 'legs' in result['trip']:
+                    logger.info(f"Route response: {len(result['trip']['legs'])} legs")
+                    if result['trip']['legs']:
+                        maneuvers_count = sum(len(leg.get('maneuvers', [])) for leg in result['trip']['legs'])
+                        logger.info(f"Total maneuvers: {maneuvers_count}")
             
             return jsonify(result)
         else:
+            logger.error(f"Valhalla error: {response.status_code}")
             return jsonify({"error": "Valhalla error"}), response.status_code
             
     except Exception as e:

@@ -44,14 +44,22 @@ def get_turn_by_turn_route(start_loc, end_loc, costing="auto", use_traffic=True)
         "costing": costing,
         "directions_options": {
             "units": "kilometers", # 거리 단위
-            "language": "ko-KR" # 경로 안내 언어 (한국어)
+            "language": "ko-KR", # 경로 안내 언어 (한국어)
+            "narrative": True,           # 추가
+            "banner_instructions": True, # 추가
+            "voice_instructions": True   # 추가
         },
         "costing_options": {
             costing: {
                 "use_live_traffic": use_traffic
             }
         },
-        "directions_type": "maneuvers" # 경로 안내 타입 (기본값)
+        "directions_type": "maneuvers", # 경로 안내 타입 (기본값)
+        "shape_match": "edge_walk",     # 추가
+        "filters": {                    # 추가
+            "attributes": ["edge.way_id", "edge.names", "edge.length"],
+            "action": "include"
+        }
         # 필요시 추가 옵션: avoid_locations, date_time 등
     }
 
