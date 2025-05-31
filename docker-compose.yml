@@ -18,8 +18,8 @@ services:
       context: .
       dockerfile: Dockerfile.proxy
     container_name: traffic_proxy_seoul
-    ports:
-      - "8002:8003"
+    expose:
+      - "8003"
     depends_on:
       - valhalla
     env_file:
@@ -42,8 +42,8 @@ services:
       context: .
       dockerfile: Dockerfile.lkh
     container_name: lkh_seoul
-    ports:
-      - "5001:5001"
+    expose:
+      - "5001"
     restart: unless-stopped
     networks:
       - tsp_network
@@ -58,8 +58,8 @@ services:
       context: .
       dockerfile: Dockerfile.pickup
     container_name: pickup_service_seoul
-    ports:
-      - "5000:5000"
+    expose:
+      - "5000"
     depends_on:
       - traffic-proxy
       - lkh
@@ -86,8 +86,8 @@ services:
       context: .
       dockerfile: Dockerfile.delivery
     container_name: delivery_service_seoul
-    ports:
-      - "5002:5000"
+    expose:
+      - "5000"
     depends_on:
       - traffic-proxy
       - lkh
