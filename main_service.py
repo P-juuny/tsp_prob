@@ -533,7 +533,7 @@ def hub_arrived():
     try:
         # 현재 로그인한 기사 확인
         driver_info = get_current_driver()
-        driver_id = driver_info['id']
+        driver_id = driver_info['user_id']
         
         # driver_id는 1-5 중 하나여야 함 (수거 기사)
         if driver_id not in [1, 2, 3, 4, 5]:
@@ -826,7 +826,7 @@ def complete_pickup():
    try:
        # 현재 로그인한 기사 확인
        driver_info = get_current_driver()
-       driver_id = driver_info['id']
+       driver_id = driver_info['user_id']
        
        data = request.json
        parcel_id = data.get('parcelId')
