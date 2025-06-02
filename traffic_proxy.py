@@ -354,23 +354,47 @@ def proxy_all(path):
 
 @app.route('/search', methods=['GET'])
 def proxy_search_to_locate():
-    """search 요청을 locate로 리다이렉트"""
+    """search 요청을 locate로 변환"""
     try:
-        # search 파라미터를 locate용으로 변환
-        params = dict(request.args)
+        text = request.args.get('text', '')
         
-        # Valhalla locate로 전달
-        response = requests.get(
-            f"{VALHALLA_URL}/locate",
-            params=params,
-            timeout=10
-        )
+        # 간단한 Nominatim 지오코딩으로 대체
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            'q': text,
+            'format': 'json',
+            'countrycodes': 'kr',
+            'limit': 1
+        }
         
-        return response.text, response.status_code, response.headers.items()
+        response = requests.get(url, params=params, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                lat = float(data[0]['lat'])
+                lon = float(data[0]['lon'])
+                
+                # Pelias 형식으로 응답
+                result = {
+                    "features": [{
+                        "geometry": {
+                            "coordinates": [lon, lat]
+                        },
+                        "properties": {
+                            "confidence": 0.9,
+                            "label": text
+                        }
+                    }]
+                }
+                return jsonify(result)
+        
+        # 실패시 기본 좌표
+        return jsonify({"features": []}), 404
         
     except Exception as e:
         logger.error(f"Search proxy error: {e}")
-        return jsonify({"error": str(e)}), 500
-
+        return jsonify({"features": []}), 404
+        
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8003, debug=False)  # debug=False로 변경
