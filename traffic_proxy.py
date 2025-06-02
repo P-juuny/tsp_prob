@@ -352,5 +352,25 @@ def proxy_all(path):
         logger.error(f"Proxy error for {path}: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/search', methods=['GET'])
+def proxy_search_to_locate():
+    """search 요청을 locate로 리다이렉트"""
+    try:
+        # search 파라미터를 locate용으로 변환
+        params = dict(request.args)
+        
+        # Valhalla locate로 전달
+        response = requests.get(
+            f"{VALHALLA_URL}/locate",
+            params=params,
+            timeout=10
+        )
+        
+        return response.text, response.status_code, response.headers.items()
+        
+    except Exception as e:
+        logger.error(f"Search proxy error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8003, debug=False)  # debug=False로 변경
