@@ -667,7 +667,7 @@ def get_next_destination():
        parcels = get_driver_parcels_from_db(driver_id)
        pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
        
-       # 🔧 현재 위치 계산 (카카오 지오코딩 사용)
+       # 🔧 현재 위치 계산 (마지막 수거 완료 위치)
        current_location = HUB_LOCATION  # 기본값
        
        # 1. 먼저 허브 도착 상태 확인
@@ -770,26 +770,83 @@ def get_next_destination():
            driver_hub_status[driver_id] = False
            logging.info(f"기사 {driver_id} 새로운 수거 시작으로 허브 상태 리셋")
        
-       # 🔧 미완료 수거가 있으면 TSP 계산 (카카오 지오코딩 사용)
-       locations = [current_location]
+       # 🔧 수거 대기 장소만 TSP 계산 (현재 위치 제외)
+       pickup_locations = []
        for pickup in pending_pickups:
            # 카카오 지오코딩으로 정확한 좌표 계산
            lat, lon, location_name = kakao_geocoding(pickup['recipientAddr'])
-           locations.append({
+           pickup_locations.append({
                "lat": lat,
                "lon": lon,
                "parcel_id": pickup['id'],
-               "parcelId": pickup['id'],  # 🔧 추가
+               "parcelId": pickup['id'],
                "name": pickup['productName'],
-               "productName": pickup['productName'],  # 🔧 추가
+               "productName": pickup['productName'],
                "address": pickup['recipientAddr'],
                "location_name": location_name
            })
        
-       # 매트릭스 계산
-       if len(locations) > 1:
-           location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
-           time_matrix, _ = get_time_distance_matrix(location_coords, costing=COSTING_MODEL)
+       # 수거 장소가 1개면 TSP 계산 없이 바로 선택
+       if len(pickup_locations) == 1:
+           next_location = pickup_locations[0]
+           
+           route_info = get_turn_by_turn_route(
+               current_location,
+               {"lat": next_location["lat"], "lon": next_location["lon"]},
+               costing=COSTING_MODEL
+           )
+           
+           # waypoints 및 coordinates 추출
+           waypoints, coordinates = extract_waypoints_from_route(route_info)
+           if not waypoints:
+               waypoints = [
+                   {
+                       "lat": current_location["lat"],
+                       "lon": current_location["lon"],
+                       "name": current_location.get("name", "출발지"),
+                       "instruction": "수거 시작"
+                   },
+                   {
+                       "lat": next_location["lat"],
+                       "lon": next_location["lon"],
+                       "name": next_location.get("location_name", next_location["productName"]),
+                       "instruction": "목적지 도착"
+                   }
+               ]
+               coordinates = [
+                   {"lat": current_location["lat"], "lon": current_location["lon"]},
+                   {"lat": next_location["lat"], "lon": next_location["lon"]}
+               ]
+           
+           if route_info and 'trip' in route_info:
+               route_info['waypoints'] = waypoints
+               route_info['coordinates'] = coordinates
+           
+           return jsonify({
+               "status": "success",
+               "next_destination": {
+                   "lat": next_location["lat"],
+                   "lon": next_location["lon"],
+                   "parcel_id": next_location.get("parcel_id"),
+                   "parcelId": next_location.get("parcel_id"),
+                   "name": next_location.get("productName"),
+                   "productName": next_location.get("productName"),
+                   "address": next_location.get("address"),
+                   "location_name": next_location.get("location_name")
+               },
+               "route": route_info,
+               "is_last": False,
+               "remaining_pickups": len(pending_pickups),
+               "geocoding_method": "kakao"
+           }), 200
+       
+       # 🔧 수거 장소가 2개 이상이면 TSP 계산
+       if len(pickup_locations) > 1:
+           # 현재 위치에서 각 수거 장소까지의 거리를 포함한 매트릭스 계산
+           all_coords = [{"lat": current_location["lat"], "lon": current_location["lon"]}]
+           all_coords.extend([{"lat": loc["lat"], "lon": loc["lon"]} for loc in pickup_locations])
+           
+           time_matrix, _ = get_time_distance_matrix(all_coords, costing=COSTING_MODEL)
            
            if time_matrix is not None:
                # LKH로 최적 경로 계산
@@ -802,113 +859,134 @@ def get_next_destination():
                    optimal_tour = result.get("tour")
                    
                    if optimal_tour and len(optimal_tour) > 1:
-                       next_idx = optimal_tour[1]
-                       next_location = locations[next_idx]
+                       # 시작점(0)이 tour에서 몇 번째인지 찾기
+                       start_pos = optimal_tour.index(0)
+                       # 그 다음 위치 선택
+                       next_pos = (start_pos + 1) % len(optimal_tour)
+                       next_idx = optimal_tour[next_pos]
                        
-                       route_info = get_turn_by_turn_route(
-                           current_location,
-                           {"lat": next_location["lat"], "lon": next_location["lon"]},
-                           costing=COSTING_MODEL
-                       )
+                       # next_idx가 0이면 (현재 위치면) 그 다음 선택
+                       if next_idx == 0:
+                           next_pos = (start_pos + 2) % len(optimal_tour)
+                           next_idx = optimal_tour[next_pos]
                        
-                       # 🔧 waypoints 및 coordinates 추출
-                       waypoints, coordinates = extract_waypoints_from_route(route_info)
-                       if not waypoints:
-                           # 기본 waypoints
-                           waypoints = [
-                               {
-                                   "lat": current_location["lat"],
-                                   "lon": current_location["lon"],
-                                   "name": current_location.get("name", "출발지"),
-                                   "instruction": "수거 시작"
-                               },
-                               {
+                       # pickup_locations에서 선택 (인덱스 조정: -1)
+                       pickup_idx = next_idx - 1
+                       if 0 <= pickup_idx < len(pickup_locations):
+                           next_location = pickup_locations[pickup_idx]
+                           
+                           route_info = get_turn_by_turn_route(
+                               current_location,
+                               {"lat": next_location["lat"], "lon": next_location["lon"]},
+                               costing=COSTING_MODEL
+                           )
+                           
+                           # waypoints 및 coordinates 추출
+                           waypoints, coordinates = extract_waypoints_from_route(route_info)
+                           if not waypoints:
+                               waypoints = [
+                                   {
+                                       "lat": current_location["lat"],
+                                       "lon": current_location["lon"],
+                                       "name": current_location.get("name", "출발지"),
+                                       "instruction": "수거 시작"
+                                   },
+                                   {
+                                       "lat": next_location["lat"],
+                                       "lon": next_location["lon"],
+                                       "name": next_location.get("location_name", next_location["productName"]),
+                                       "instruction": "목적지 도착"
+                                   }
+                               ]
+                               coordinates = [
+                                   {"lat": current_location["lat"], "lon": current_location["lon"]},
+                                   {"lat": next_location["lat"], "lon": next_location["lon"]}
+                               ]
+                           
+                           if route_info and 'trip' in route_info:
+                               route_info['waypoints'] = waypoints
+                               route_info['coordinates'] = coordinates
+                           
+                           return jsonify({
+                               "status": "success",
+                               "next_destination": {
                                    "lat": next_location["lat"],
                                    "lon": next_location["lon"],
-                                   "name": next_location.get("location_name", next_location["name"]),
-                                   "instruction": "목적지 도착"
-                               }
-                           ]
-                           # 기본 coordinates
-                           coordinates = [
-                               {"lat": current_location["lat"], "lon": current_location["lon"]},
-                               {"lat": next_location["lat"], "lon": next_location["lon"]}
-                           ]
-                       
-                       # route에 waypoints와 coordinates 추가
-                       if route_info and 'trip' in route_info:
-                           route_info['waypoints'] = waypoints
-                           route_info['coordinates'] = coordinates
-                       
-                       return jsonify({
-                           "status": "success",
-                           "next_destination": {
-                               "lat": next_location["lat"],
-                               "lon": next_location["lon"],
-                               "parcel_id": next_location.get("parcel_id"),
-                               "parcelId": next_location.get("parcel_id"),
-                               "name": next_location.get("productName", next_location.get("name")),
-                               "productName": next_location.get("productName", next_location.get("name")),
-                               "address": next_location.get("address"),
-                               "location_name": next_location.get("location_name")
-                           },
-                           "route": route_info,
-                           "is_last": False,
-                           "remaining_pickups": len(pending_pickups),
-                           "geocoding_method": "kakao"
-                       }), 200
+                                   "parcel_id": next_location.get("parcel_id"),
+                                   "parcelId": next_location.get("parcel_id"),
+                                   "name": next_location.get("productName"),
+                                   "productName": next_location.get("productName"),
+                                   "address": next_location.get("address"),
+                                   "location_name": next_location.get("location_name")
+                               },
+                               "route": route_info,
+                               "is_last": False,
+                               "remaining_pickups": len(pending_pickups),
+                               "geocoding_method": "kakao"
+                           }), 200
        
-       # 가장 가까운 수거 지점으로
-       next_location = locations[1] if len(locations) > 1 else HUB_LOCATION
-       route_info = get_turn_by_turn_route(
-           current_location,
-           {"lat": next_location["lat"], "lon": next_location["lon"]},
-           costing=COSTING_MODEL
-       )
-       
-       # 🔧 waypoints 및 coordinates 추출 (fallback)
-       waypoints, coordinates = extract_waypoints_from_route(route_info)
-       if not waypoints:
-           waypoints = [
-               {
-                   "lat": current_location["lat"],
-                   "lon": current_location["lon"],
-                   "name": current_location.get("name", "출발지"),
-                   "instruction": "출발"
-               },
-               {
+       # 🔧 fallback: 첫 번째 수거 장소 선택
+       if pickup_locations:
+           next_location = pickup_locations[0]
+           
+           route_info = get_turn_by_turn_route(
+               current_location,
+               {"lat": next_location["lat"], "lon": next_location["lon"]},
+               costing=COSTING_MODEL
+           )
+           
+           # waypoints 및 coordinates 추출
+           waypoints, coordinates = extract_waypoints_from_route(route_info)
+           if not waypoints:
+               waypoints = [
+                   {
+                       "lat": current_location["lat"],
+                       "lon": current_location["lon"],
+                       "name": current_location.get("name", "출발지"),
+                       "instruction": "출발"
+                   },
+                   {
+                       "lat": next_location["lat"],
+                       "lon": next_location["lon"],
+                       "name": next_location.get("location_name", next_location.get("productName", "목적지")),
+                       "instruction": "도착"
+                   }
+               ]
+               coordinates = [
+                   {"lat": current_location["lat"], "lon": current_location["lon"]},
+                   {"lat": next_location["lat"], "lon": next_location["lon"]}
+               ]
+           
+           if route_info and 'trip' in route_info:
+               route_info['waypoints'] = waypoints
+               route_info['coordinates'] = coordinates
+           
+           return jsonify({
+               "status": "success",
+               "next_destination": {
                    "lat": next_location["lat"],
-                   "lon": next_location["lon"],  
-                   "name": next_location.get("location_name", next_location.get("name", "목적지")),
-                   "instruction": "도착"
-               }
-           ]
-           # 기본 coordinates
-           coordinates = [
-               {"lat": current_location["lat"], "lon": current_location["lon"]},
-               {"lat": next_location["lat"], "lon": next_location["lon"]}
-           ]
+                   "lon": next_location["lon"],
+                   "parcel_id": next_location.get("parcel_id"),
+                   "parcelId": next_location.get("parcel_id"),
+                   "name": next_location.get("productName"),
+                   "productName": next_location.get("productName"),
+                   "address": next_location.get("address"),
+                   "location_name": next_location.get("location_name")
+               },
+               "route": route_info,
+               "is_last": False,
+               "remaining_pickups": len(pending_pickups),
+               "geocoding_method": "kakao"
+           }), 200
        
-       if route_info and 'trip' in route_info:
-           route_info['waypoints'] = waypoints
-           route_info['coordinates'] = coordinates
-       
+       # 마지막 fallback: 허브로
        return jsonify({
-           "status": "success",
-           "next_destination": {
-               "lat": next_location["lat"],
-               "lon": next_location["lon"],
-               "parcel_id": next_location.get("parcel_id"),
-               "parcelId": next_location.get("parcel_id"),
-               "name": next_location.get("productName", next_location.get("name")),
-               "productName": next_location.get("productName", next_location.get("name")),
-               "address": next_location.get("address"),
-               "location_name": next_location.get("location_name")
-           },
-           "route": route_info,
-           "is_last": False,
-           "remaining_pickups": len(pending_pickups),
-           "geocoding_method": "kakao"
+           "status": "return_to_hub",
+           "message": "수거할 장소가 없습니다. 허브로 복귀해주세요.",
+           "next_destination": HUB_LOCATION,
+           "is_last": True,
+           "remaining_pickups": 0,
+           "current_location": current_location
        }), 200
            
    except Exception as e:
