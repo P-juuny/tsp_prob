@@ -679,7 +679,7 @@ def get_next_destination():
            today = datetime.now(KST).strftime('%Y-%m-%d')
            completed_today = [p for p in parcels 
                             if p['status'] == 'COMPLETED' 
-                            and p.get('pickupCompletedAt', '').startswith(today)]
+                            and (p.get('pickupCompletedAt') or '').startswith(today)]
            
            if completed_today:
                last_completed = sorted(completed_today, 
