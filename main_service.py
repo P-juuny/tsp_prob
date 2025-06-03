@@ -779,7 +779,9 @@ def get_next_destination():
                "lat": lat,
                "lon": lon,
                "parcel_id": pickup['id'],
+               "parcelId": pickup['id'],  # 🔧 추가
                "name": pickup['productName'],
+               "productName": pickup['productName'],  # 🔧 추가
                "address": pickup['recipientAddr'],
                "location_name": location_name
            })
@@ -840,7 +842,16 @@ def get_next_destination():
                        
                        return jsonify({
                            "status": "success",
-                           "next_destination": next_location,
+                           "next_destination": {
+                               "lat": next_location["lat"],
+                               "lon": next_location["lon"],
+                               "parcel_id": next_location.get("parcel_id"),
+                               "parcelId": next_location.get("parcel_id"),
+                               "name": next_location.get("productName", next_location.get("name")),
+                               "productName": next_location.get("productName", next_location.get("name")),
+                               "address": next_location.get("address"),
+                               "location_name": next_location.get("location_name")
+                           },
                            "route": route_info,
                            "is_last": False,
                            "remaining_pickups": len(pending_pickups),
@@ -884,7 +895,16 @@ def get_next_destination():
        
        return jsonify({
            "status": "success",
-           "next_destination": next_location,
+           "next_destination": {
+               "lat": next_location["lat"],
+               "lon": next_location["lon"],
+               "parcel_id": next_location.get("parcel_id"),
+               "parcelId": next_location.get("parcel_id"),
+               "name": next_location.get("productName", next_location.get("name")),
+               "productName": next_location.get("productName", next_location.get("name")),
+               "address": next_location.get("address"),
+               "location_name": next_location.get("location_name")
+           },
            "route": route_info,
            "is_last": False,
            "remaining_pickups": len(pending_pickups),
