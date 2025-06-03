@@ -33,6 +33,11 @@ LKH_SERVICE_URL = os.environ.get("LKH_SERVICE_URL", "http://lkh:5001/solve")
 VALHALLA_HOST = os.environ.get("VALHALLA_HOST", "traffic-proxy")
 VALHALLA_PORT = os.environ.get("VALHALLA_PORT", "8003")
 
+# 🔧 카카오 API 설정
+KAKAO_API_KEY = os.environ.get('KAKAO_API_KEY', 'YOUR_KAKAO_API_KEY_HERE')
+KAKAO_ADDRESS_API = "https://dapi.kakao.com/v2/local/search/address.json"
+KAKAO_KEYWORD_API = "https://dapi.kakao.com/v2/local/search/keyword.json"
+
 # 기사별 허브 도착 상태 (메모리 저장)
 driver_hub_status = {}  # {driver_id: True/False}
 
@@ -194,7 +199,7 @@ def assign_driver_to_parcel_in_db(parcel_id, driver_id):
        conn.close()
 
 def assign_driver_to_parcel_for_tomorrow(parcel_id, tomorrow_date):
-   """내일 처리용으로 소포 할당"""
+   """내일 처리용으로 소포 할당 - 카카오 지오코딩 사용"""
    conn = get_db_connection()
    try:
        with conn.cursor() as cursor:
@@ -204,19 +209,17 @@ def assign_driver_to_parcel_for_tomorrow(parcel_id, tomorrow_date):
                return False
            
            address = parcel.get('recipientAddr', '')
-           # 구 추출
-           address_parts = address.split()
-           district = None
-           for part in address_parts:
-               if part.endswith('구'):
-                   district = part
-                   break
+           
+           # 🔧 카카오 API로 구 정보 추출
+           district = extract_district_from_kakao_geocoding(address)
            
            if not district:
+               logging.warning(f"구 정보 추출 실패: {address}")
                return False
            
            driver_id = DISTRICT_DRIVER_MAPPING.get(district)
            if not driver_id:
+               logging.warning(f"해당 구에 대응하는 기사 없음: {district}")
                return False
            
            # 내일 처리용으로 할당
@@ -305,81 +308,148 @@ def get_completed_pickups_today_from_db():
    finally:
        conn.close()
 
-# --- 주소 처리 함수들 (수정됨) ---
-def address_to_coordinates(address):
-   """주소를 위도/경도로 변환 (개선된 버전)"""
-   try:
-       url = f"http://{VALHALLA_HOST}:{VALHALLA_PORT}/search"
-       params = {
-           "text": address,
-           "focus.point.lat": 37.5665,
-           "focus.point.lon": 126.9780,
-           "boundary.country": "KR",
-           "size": 5  # 더 많은 결과 요청
-       }
-       
-       response = requests.get(url, params=params, timeout=10)
-       
-       if response.status_code == 200:
-           data = response.json()
-           if data.get("features") and len(data["features"]) > 0:
-               # 가장 정확한 매치 선택
-               for feature in data["features"]:
-                   coords = feature["geometry"]["coordinates"]
-                   confidence = feature.get("properties", {}).get("confidence", 0)
-                   
-                   # 최소 신뢰도 확인
-                   if confidence > 0.7:
-                       logging.info(f"지오코딩 성공: {address} -> ({coords[1]}, {coords[0]}) 신뢰도: {confidence}")
-                       return coords[1], coords[0]
-               
-               # 신뢰도가 낮더라도 첫 번째 결과 사용
-               coords = data["features"][0]["geometry"]["coordinates"]
-               logging.info(f"지오코딩 (낮은 신뢰도): {address} -> ({coords[1]}, {coords[0]})")
-               return coords[1], coords[0]
-       
-       logging.warning(f"지오코딩 실패, 기본 좌표 사용: {address}")
-       return get_default_coordinates(address)
-           
-   except Exception as e:
-       logging.error(f"지오코딩 오류: {e}")
-       return get_default_coordinates(address)
+# --- 🔧 카카오 지오코딩 전용 함수들 ---
 
-def get_default_coordinates(address):
-   """구별 기본 좌표"""
-   district_coords = {
-       "강남구": (37.5172, 127.0473),
-       "서초구": (37.4837, 127.0324),
-       "송파구": (37.5145, 127.1059),
-       "강동구": (37.5301, 127.1238),
-       "성동구": (37.5634, 127.0369),
-       "광진구": (37.5384, 127.0822),
-       "동대문구": (37.5744, 127.0396),
-       "중랑구": (37.6063, 127.0927),
-       "종로구": (37.5735, 126.9790),
-       "중구": (37.5641, 126.9979),
-       "용산구": (37.5311, 126.9810),
-       "성북구": (37.5894, 127.0167),
-       "강북구": (37.6396, 127.0253),
-       "도봉구": (37.6687, 127.0472),
-       "노원구": (37.6543, 127.0568),
-       "은평구": (37.6176, 126.9269),
-       "서대문구": (37.5791, 126.9368),
-       "마포구": (37.5638, 126.9084),
-       "양천구": (37.5170, 126.8667),
-       "강서구": (37.5509, 126.8496),
-       "구로구": (37.4954, 126.8877),
-       "금천구": (37.4564, 126.8955),
-       "영등포구": (37.5263, 126.8966),
-       "동작구": (37.5124, 126.9393),
-       "관악구": (37.4784, 126.9516)
-   }
-   
-   for district, coords in district_coords.items():
-       if district in address:
-           return coords
-   
-   return (37.5665, 126.9780)
+def kakao_geocoding(address):
+    """카카오 API로 주소를 위도/경도로 변환"""
+    try:
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        
+        # 1차: 주소 검색 API 시도
+        params = {"query": address}
+        response = requests.get(KAKAO_ADDRESS_API, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            documents = data.get("documents", [])
+            
+            if documents:
+                doc = documents[0]  # 첫 번째 결과 사용
+                lat = float(doc["y"])
+                lon = float(doc["x"])
+                address_name = doc.get("address_name", address)
+                
+                logging.info(f"카카오 주소 검색 성공: {address} -> ({lat}, {lon}) [{address_name}]")
+                return lat, lon, address_name
+        
+        # 2차: 주소 검색 실패시 키워드 검색 시도
+        response = requests.get(KAKAO_KEYWORD_API, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            documents = data.get("documents", [])
+            
+            if documents:
+                doc = documents[0]  # 첫 번째 결과 사용
+                lat = float(doc["y"])
+                lon = float(doc["x"])
+                place_name = doc.get("place_name", address)
+                
+                logging.info(f"카카오 키워드 검색 성공: {address} -> ({lat}, {lon}) [{place_name}]")
+                return lat, lon, place_name
+        
+        # 카카오 API 실패시 기본 좌표
+        logging.warning(f"카카오 지오코딩 실패, 기본 좌표 사용: {address}")
+        return get_default_coordinates_by_district(address)
+        
+    except Exception as e:
+        logging.error(f"카카오 지오코딩 오류: {e}")
+        return get_default_coordinates_by_district(address)
+
+def extract_district_from_kakao_geocoding(address):
+    """카카오 API를 통해 정확한 구 정보 추출"""
+    try:
+        headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
+        params = {"query": address}
+        
+        # 주소 검색 API 사용
+        response = requests.get(KAKAO_ADDRESS_API, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            documents = data.get("documents", [])
+            
+            if documents:
+                doc = documents[0]
+                
+                # address 객체에서 구 정보 추출
+                address_info = doc.get("address", {})
+                if address_info:
+                    district = address_info.get("region_2depth_name", "")
+                    if district and district.endswith("구"):
+                        logging.info(f"카카오 API로 구 추출 성공: {address} -> {district}")
+                        return district
+                
+                # road_address 객체에서 구 정보 추출
+                road_address = doc.get("road_address", {})
+                if road_address:
+                    district = road_address.get("region_2depth_name", "")
+                    if district and district.endswith("구"):
+                        logging.info(f"카카오 API로 구 추출 성공 (도로명): {address} -> {district}")
+                        return district
+        
+        # API 실패시 텍스트에서 직접 추출
+        address_parts = address.split()
+        for part in address_parts:
+            if part.endswith('구'):
+                logging.info(f"텍스트에서 구 추출: {address} -> {part}")
+                return part
+        
+        logging.warning(f"구 정보 추출 실패: {address}")
+        return None
+        
+    except Exception as e:
+        logging.error(f"구 추출 오류: {e}")
+        # fallback: 텍스트에서 직접 추출
+        address_parts = address.split()
+        for part in address_parts:
+            if part.endswith('구'):
+                return part
+        return None
+
+def address_to_coordinates(address):
+    """카카오 API를 사용한 주소 -> 좌표 변환 (메인 함수)"""
+    lat, lon, _ = kakao_geocoding(address)
+    return lat, lon
+
+def get_default_coordinates_by_district(address):
+    """구별 기본 좌표 (카카오 API 실패시 사용)"""
+    district_coords = {
+        "강남구": (37.5172, 127.0473, "강남구 역삼동"),
+        "서초구": (37.4837, 127.0324, "서초구 서초동"),
+        "송파구": (37.5145, 127.1059, "송파구 잠실동"),
+        "강동구": (37.5301, 127.1238, "강동구 천호동"),
+        "성동구": (37.5634, 127.0369, "성동구 성수동"),
+        "광진구": (37.5384, 127.0822, "광진구 광장동"),
+        "동대문구": (37.5744, 127.0396, "동대문구 전농동"),
+        "중랑구": (37.6063, 127.0927, "중랑구 면목동"),
+        "종로구": (37.5735, 126.9790, "종로구 종로"),
+        "중구": (37.5641, 126.9979, "중구 명동"),
+        "용산구": (37.5311, 126.9810, "용산구 한강로"),
+        "성북구": (37.5894, 127.0167, "성북구 성북동"),
+        "강북구": (37.6396, 127.0253, "강북구 번동"),
+        "도봉구": (37.6687, 127.0472, "도봉구 방학동"),
+        "노원구": (37.6543, 127.0568, "노원구 상계동"),
+        "은평구": (37.6176, 126.9269, "은평구 불광동"),
+        "서대문구": (37.5791, 126.9368, "서대문구 신촌동"),
+        "마포구": (37.5638, 126.9084, "마포구 공덕동"),
+        "양천구": (37.5170, 126.8667, "양천구 목동"),
+        "강서구": (37.5509, 126.8496, "강서구 화곡동"),
+        "구로구": (37.4954, 126.8877, "구로구 구로동"),
+        "금천구": (37.4564, 126.8955, "금천구 가산동"),
+        "영등포구": (37.5263, 126.8966, "영등포구 영등포동"),
+        "동작구": (37.5124, 126.9393, "동작구 상도동"),
+        "관악구": (37.4784, 126.9516, "관악구 봉천동")
+    }
+    
+    for district, (lat, lon, name) in district_coords.items():
+        if district in address:
+            logging.info(f"기본 좌표 사용: {address} -> ({lat}, {lon}) [{name}]")
+            return lat, lon, name
+    
+    # 서울시청 기본 좌표
+    logging.warning(f"구를 찾을 수 없어 서울시청 좌표 사용: {address}")
+    return 37.5665, 126.9780, "서울시청"
 
 # 🔧 수정된 waypoints 추출 함수
 def extract_waypoints_from_route(route_info):
@@ -486,27 +556,26 @@ def webhook_new_pickup():
        if parcel.get('driverId') or parcel.get('pickupDriverId'):
            return jsonify({"status": "already_processed"}), 200
        
-       # 주소로 좌표 변환
+       # 🔧 카카오 API로 주소 처리
        address = parcel.get('recipientAddr', '')
-       lat, lon = address_to_coordinates(address)
+       lat, lon, location_name = kakao_geocoding(address)
        
-       # 구 추출
-       address_parts = address.split()
-       district = None
-       for part in address_parts:
-           if part.endswith('구'):
-               district = part
-               break
+       # 🔧 카카오 API로 구 정보 추출
+       district = extract_district_from_kakao_geocoding(address)
        
        if not district:
-           return jsonify({"error": "Could not determine district"}), 400
+           return jsonify({
+               "error": "Could not determine district from address",
+               "address": address
+           }), 400
        
        # 구별로 기사 직접 할당
        driver_id = DISTRICT_DRIVER_MAPPING.get(district)
        if not driver_id:
            return jsonify({
                "status": "error",
-               "message": f"No driver for district {district}"
+               "message": f"No driver for district {district}",
+               "district": district
            }), 500
        
        # DB에 기사 할당 (오늘 처리용)
@@ -517,7 +586,9 @@ def webhook_new_pickup():
                "district": district,
                "driverId": driver_id,
                "coordinates": {"lat": lat, "lon": lon},
-               "scheduled_for": "today"
+               "location_name": location_name,
+               "scheduled_for": "today",
+               "geocoding_method": "kakao"
            }), 200
        else:
            return jsonify({"error": "Failed to assign driver"}), 500
@@ -566,7 +637,7 @@ def hub_arrived():
 @app.route('/api/pickup/next', methods=['GET'])
 @auth_required
 def get_next_destination():
-   """현재 로그인한 기사의 다음 최적 목적지 계산 (수정된 버전)"""
+   """현재 로그인한 기사의 다음 최적 목적지 계산 (카카오 지오코딩 사용)"""
    try:
        # 현재 로그인한 기사 정보 가져오기
        driver_info = get_current_driver()
@@ -596,7 +667,7 @@ def get_next_destination():
        parcels = get_driver_parcels_from_db(driver_id)
        pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
        
-       # 🔧 현재 위치 계산 (개선된 버전)
+       # 🔧 현재 위치 계산 (카카오 지오코딩 사용)
        current_location = HUB_LOCATION  # 기본값
        
        # 1. 먼저 허브 도착 상태 확인
@@ -615,9 +686,10 @@ def get_next_destination():
                                      key=lambda x: x['pickupCompletedAt'], 
                                      reverse=True)[0]
                actual_address = last_completed['recipientAddr']
-               lat, lon = address_to_coordinates(actual_address)
-               current_location = {"lat": lat, "lon": lon}
-               logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
+               # 🔧 카카오 지오코딩 사용
+               lat, lon, location_name = kakao_geocoding(actual_address)
+               current_location = {"lat": lat, "lon": lon, "name": location_name}
+               logging.info(f"마지막 수거 완료 위치 (카카오): {actual_address} -> ({lat}, {lon}) [{location_name}]")
        
        # 미완료 수거가 없을 때
        if not pending_pickups:
@@ -661,7 +733,7 @@ def get_next_destination():
                        {
                            "lat": current_location["lat"],
                            "lon": current_location["lon"],
-                           "name": "현재위치",
+                           "name": current_location.get("name", "현재위치"),
                            "instruction": "허브로 복귀 시작"
                        },
                        {
@@ -698,16 +770,18 @@ def get_next_destination():
            driver_hub_status[driver_id] = False
            logging.info(f"기사 {driver_id} 새로운 수거 시작으로 허브 상태 리셋")
        
-       # 미완료 수거가 있으면 TSP 계산
+       # 🔧 미완료 수거가 있으면 TSP 계산 (카카오 지오코딩 사용)
        locations = [current_location]
        for pickup in pending_pickups:
-           lat, lon = address_to_coordinates(pickup['recipientAddr'])
+           # 카카오 지오코딩으로 정확한 좌표 계산
+           lat, lon, location_name = kakao_geocoding(pickup['recipientAddr'])
            locations.append({
                "lat": lat,
                "lon": lon,
                "parcel_id": pickup['id'],
                "name": pickup['productName'],
-               "address": pickup['recipientAddr']
+               "address": pickup['recipientAddr'],
+               "location_name": location_name
            })
        
        # 매트릭스 계산
@@ -743,13 +817,13 @@ def get_next_destination():
                                {
                                    "lat": current_location["lat"],
                                    "lon": current_location["lon"],
-                                   "name": "출발지",
+                                   "name": current_location.get("name", "출발지"),
                                    "instruction": "수거 시작"
                                },
                                {
                                    "lat": next_location["lat"],
                                    "lon": next_location["lon"],
-                                   "name": next_location["name"],
+                                   "name": next_location.get("location_name", next_location["name"]),
                                    "instruction": "목적지 도착"
                                }
                            ]
@@ -769,7 +843,8 @@ def get_next_destination():
                            "next_destination": next_location,
                            "route": route_info,
                            "is_last": False,
-                           "remaining_pickups": len(pending_pickups)
+                           "remaining_pickups": len(pending_pickups),
+                           "geocoding_method": "kakao"
                        }), 200
        
        # 가장 가까운 수거 지점으로
@@ -787,13 +862,13 @@ def get_next_destination():
                {
                    "lat": current_location["lat"],
                    "lon": current_location["lon"],
-                   "name": "출발지",
+                   "name": current_location.get("name", "출발지"),
                    "instruction": "출발"
                },
                {
                    "lat": next_location["lat"],
                    "lon": next_location["lon"],  
-                   "name": next_location.get("name", "목적지"),
+                   "name": next_location.get("location_name", next_location.get("name", "목적지")),
                    "instruction": "도착"
                }
            ]
@@ -812,7 +887,8 @@ def get_next_destination():
            "next_destination": next_location,
            "route": route_info,
            "is_last": False,
-           "remaining_pickups": len(pending_pickups)
+           "remaining_pickups": len(pending_pickups),
+           "geocoding_method": "kakao"
        }), 200
            
    except Exception as e:
@@ -951,7 +1027,11 @@ def check_all_completed():
 
 @app.route('/api/pickup/status')
 def status():
-   return jsonify({"status": "healthy"})
+   return jsonify({
+       "status": "healthy",
+       "geocoding": "kakao",
+       "kakao_api_configured": bool(KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE')
+   })
 
 # 디버깅용 엔드포인트 - DB 직접 확인
 @app.route('/api/debug/db-check')
@@ -966,7 +1046,8 @@ def check_db_connection():
        return jsonify({
            "status": "success",
            "connection": "ok",
-           "total_parcels": result['count']
+           "total_parcels": result['count'],
+           "geocoding": "kakao"
        }), 200
    except Exception as e:
        return jsonify({
@@ -974,10 +1055,44 @@ def check_db_connection():
            "message": f"DB connection failed: {str(e)}"
        }), 500
 
+# 🔧 디버깅용 - 카카오 지오코딩 테스트
+@app.route('/api/debug/kakao-test', methods=['POST'])
+def test_kakao_geocoding():
+    """카카오 지오코딩 테스트 엔드포인트"""
+    try:
+        data = request.json
+        address = data.get('address', '')
+        
+        if not address:
+            return jsonify({"error": "address is required"}), 400
+        
+        # 카카오 지오코딩 테스트
+        lat, lon, location_name = kakao_geocoding(address)
+        
+        # 구 추출 테스트
+        district = extract_district_from_kakao_geocoding(address)
+        
+        # 기사 할당 테스트
+        driver_id = DISTRICT_DRIVER_MAPPING.get(district) if district else None
+        
+        return jsonify({
+            "input_address": address,
+            "coordinates": {"lat": lat, "lon": lon},
+            "location_name": location_name,
+            "extracted_district": district,
+            "assigned_driver": driver_id,
+            "api_status": "ok" if KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE' else "api_key_needed"
+        }), 200
+        
+    except Exception as e:
+        logging.error(f"카카오 지오코딩 테스트 오류: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # --- 메인 실행 ---
 if __name__ == "__main__":
    port = int(os.environ.get("PORT", 5000))
    host = os.environ.get("HOST", "0.0.0.0")
    
    logging.info(f"Starting TSP optimization service on {host}:{port}")
+   logging.info(f"카카오 API 설정: {'OK' if KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE' else 'API KEY 필요'}")
    app.run(host=host, port=port, debug=False)
