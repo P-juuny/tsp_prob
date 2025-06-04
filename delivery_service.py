@@ -25,6 +25,8 @@ logging.basicConfig(
     ]
 )
 
+driver_hub_status = {}
+
 # --- 설정 ---
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL")  # 실제 백엔드 주소
 LKH_SERVICE_URL = os.environ.get("LKH_SERVICE_URL", "http://lkh:5001/solve")
