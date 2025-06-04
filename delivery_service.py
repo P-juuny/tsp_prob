@@ -140,56 +140,43 @@ def get_unassigned_deliveries_today_from_db():
         conn.close()
 
 def get_driver_deliveries_from_db(driver_id):
-    """DB에서 배달 기사의 배달 목록 가져오기"""
-    conn = get_db_connection()
+    """DB에서 기사의 배달 목록 조회 (Parcel 테이블 사용)"""
+    connection = get_db_connection()
     try:
-        with conn.cursor() as cursor:
-            sql = """
-            SELECT p.*, 
-                   o.name as ownerName
-            FROM Parcel p
-            LEFT JOIN User o ON p.ownerId = o.id
-            WHERE p.deliveryDriverId = %s
-            AND (p.status = 'DELIVERY_PENDING' OR p.status = 'DELIVERY_COMPLETED')
-            AND p.isDeleted = 0
-            ORDER BY p.isNextDeliveryTarget DESC, p.createdAt ASC
+        with connection.cursor() as cursor:
+            # 🔧 Parcel 테이블에서 배달 데이터 조회
+            query = """
+            SELECT 
+                id,
+                productName,
+                recipientName,
+                recipientPhone,
+                recipientAddr,
+                status,
+                deliveryCompletedAt as completedAt,
+                createdAt
+            FROM Parcel 
+            WHERE deliveryDriverId = %s 
+            AND isDeleted = 0
+            AND status IN ('DELIVERY_PENDING', 'COMPLETED')
+            ORDER BY createdAt DESC
             """
-            cursor.execute(sql, (driver_id,))
+            cursor.execute(query, (driver_id,))
             deliveries = cursor.fetchall()
             
-            # 날짜 필드를 문자열로 변환하고 상태값 변환
-            result = []
-            for p in deliveries:
-                # 상태값 변환
-                status = 'IN_PROGRESS' if p['status'] == 'DELIVERY_PENDING' else 'COMPLETED'
-                
-                # 날짜 필드 처리
-                delivery_completed_at = p['deliveryCompletedAt'].isoformat() if p['deliveryCompletedAt'] else None
-                pickup_completed_at = p['pickupCompletedAt'].isoformat() if p['pickupCompletedAt'] else None
-                
-                item = {
-                    'id': p['id'],
-                    'status': status,
-                    'recipientAddr': p['recipientAddr'],
-                    'productName': p['productName'],
-                    'completedAt': delivery_completed_at,
-                    'pickupCompletedAt': pickup_completed_at,
-                    'ownerId': p['ownerId'],
-                    'ownerName': p.get('ownerName'),
-                    'size': p['size'],
-                    'isNextDeliveryTarget': p['isNextDeliveryTarget'],
-                    'recipientName': p['recipientName'],
-                    'recipientPhone': p['recipientPhone']
-                }
-                result.append(item)
+            # 🔧 상태 매핑 (DELIVERY_PENDING -> IN_PROGRESS)
+            for delivery in deliveries:
+                if delivery['status'] == 'DELIVERY_PENDING':
+                    delivery['status'] = 'IN_PROGRESS'
             
-            return result
+            return deliveries
+            
     except Exception as e:
-        logging.error(f"DB 쿼리 오류: {e}")
+        logging.error(f"배달 목록 조회 오류: {e}")
         return []
     finally:
-        conn.close()
-
+        connection.close()
+        
 def convert_pickup_to_delivery_in_db(pickup_id):
     """DB에서 수거를 배달로 전환"""
     conn = get_db_connection()
