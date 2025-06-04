@@ -565,8 +565,12 @@ def assign_to_drivers():
 @app.route('/api/delivery/next', methods=['GET'])
 @auth_required
 def get_next_delivery():
-    """현재 기사의 다음 배달지 계산 - 카카오 지오코딩 사용"""
+    """현재 기사의 다음 배달지 계산 (수거 API 구조 참고)"""
     try:
+        # 현재 로그인한 기사 정보
+        driver_info = get_current_driver()
+        driver_id = driver_info['id']
+        
         # 시간 체크 추가
         current_time = datetime.now(KST).time()
         if current_time < DELIVERY_START_TIME:  # 오후 3시 이전
@@ -583,32 +587,59 @@ def get_next_delivery():
                 "current_time": current_time.strftime("%H:%M")
             }), 200
         
-        # 현재 로그인한 기사 정보
-        driver_info = get_current_driver()
-        driver_id = driver_info['id']
-        
         # DB에서 내 배달 목록 가져오기
         my_deliveries = get_driver_deliveries_from_db(driver_id)
-        pending = [d for d in my_deliveries if d['status'] == 'IN_PROGRESS']
+        pending_deliveries = [d for d in my_deliveries if d['status'] == 'IN_PROGRESS']
         
-        if not pending:
-            # 모든 배달 완료, 허브로 복귀
-            completed = [d for d in my_deliveries if d['status'] == 'COMPLETED']
+        # 🔧 현재 위치 계산 (마지막 배달 완료 위치)
+        current_location = HUB_LOCATION  # 기본값
+        
+        # 1. 먼저 허브 도착 상태 확인
+        if driver_hub_status.get(driver_id, False):
+            current_location = HUB_LOCATION
+            logging.info(f"배달 기사 {driver_id} 허브 도착 완료 상태")
+        else:
+            # 2. 오늘 완료된 배달이 있으면 마지막 완료 위치가 현재 위치
+            today = datetime.now(KST).strftime('%Y-%m-%d')
+            completed_today = [d for d in my_deliveries 
+                             if d['status'] == 'COMPLETED' 
+                             and (d.get('completedAt') or '').startswith(today)]
             
-            if completed:
-                # 마지막 완료 위치에서 출발 (카카오 지오코딩 사용)
-                last = max(completed, key=lambda x: x['completedAt'])
-                lat, lon, location_name = kakao_geocoding(last['recipientAddr'])
+            if completed_today:
+                last_completed = sorted(completed_today, 
+                                      key=lambda x: x['completedAt'], 
+                                      reverse=True)[0]
+                actual_address = last_completed['recipientAddr']
+                # 🔧 카카오 지오코딩 사용
+                lat, lon, location_name = kakao_geocoding(actual_address)
                 current_location = {"lat": lat, "lon": lon, "name": location_name}
-            else:
-                # 허브에서 출발
-                current_location = HUB_LOCATION
+                logging.info(f"마지막 배달 완료 위치 (카카오): {actual_address} -> ({lat}, {lon}) [{location_name}]")
+        
+        # 미완료 배달이 없을 때
+        if not pending_deliveries:
+            current_time = datetime.now(KST).time()
             
-            route = get_turn_by_turn_route(current_location, HUB_LOCATION, COSTING_MODEL)
+            # 🔧 이미 허브에 있다면
+            if driver_hub_status.get(driver_id, False):
+                return jsonify({
+                    "status": "at_hub",
+                    "message": "허브에 도착했습니다. 수고하셨습니다!",
+                    "current_location": current_location,
+                    "remaining": 0,
+                    "is_last": True
+                }), 200
             
-            # waypoints 및 coordinates 추출
-            waypoints, coordinates = extract_waypoints_from_route(route)
+            # 🔧 모든 배달 완료면 허브 복귀
+            route_info = get_turn_by_turn_route(
+                current_location,
+                HUB_LOCATION,
+                costing=COSTING_MODEL
+            )
+            
+            # 🔧 waypoints 및 coordinates 추출
+            waypoints, coordinates = extract_waypoints_from_route(route_info)
             if not waypoints:
+                # 기본 waypoints (출발지 -> 목적지)
                 waypoints = [
                     {
                         "lat": current_location["lat"],
@@ -623,155 +654,264 @@ def get_next_delivery():
                         "instruction": "허브 도착"
                     }
                 ]
+                # 기본 coordinates
                 coordinates = [
                     {"lat": current_location["lat"], "lon": current_location["lon"]},
                     {"lat": HUB_LOCATION["lat"], "lon": HUB_LOCATION["lon"]}
                 ]
             
-            if route and 'trip' in route:
-                route['waypoints'] = waypoints
-                route['coordinates'] = coordinates
+            # 🔧 route에 waypoints와 coordinates 추가
+            if route_info and 'trip' in route_info:
+                route_info['waypoints'] = waypoints
+                route_info['coordinates'] = coordinates
             
             return jsonify({
-                "status": "success",
+                "status": "return_to_hub",
+                "message": "모든 배달이 완료되었습니다. 허브로 복귀해주세요.",
                 "next_destination": HUB_LOCATION,
-                "route": route,
+                "route": route_info,
                 "is_last": True,
                 "remaining": 0,
-                "geocoding_method": "kakao"
+                "current_location": current_location,
+                "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
             }), 200
         
-        # 현재 위치 결정 (카카오 지오코딩 사용)
-        completed = [d for d in my_deliveries if d['status'] == 'COMPLETED']
-        if completed:
-            last = max(completed, key=lambda x: x['completedAt'])
-            lat, lon, location_name = kakao_geocoding(last['recipientAddr'])
-            current_location = {"lat": lat, "lon": lon, "name": location_name}
-        else:
-            current_location = HUB_LOCATION
+        # 🔧 새로운 배달이 시작되면 허브 상태 리셋
+        if pending_deliveries and driver_hub_status.get(driver_id, False):
+            driver_hub_status[driver_id] = False
+            logging.info(f"배달 기사 {driver_id} 새로운 배달 시작으로 허브 상태 리셋")
         
-        # TSP 계산 (카카오 지오코딩으로 정확한 좌표 사용)
-        locations = [current_location]
-        for delivery in pending:
+        # 🔧 배달 대기 장소만 TSP 계산 (현재 위치 제외)
+        delivery_locations = []
+        for delivery in pending_deliveries:
+            # 카카오 지오코딩으로 정확한 좌표 계산
             lat, lon, location_name = kakao_geocoding(delivery['recipientAddr'])
-            locations.append({
+            delivery_locations.append({
                 "lat": lat,
                 "lon": lon,
                 "delivery_id": delivery['id'],
+                "parcelId": str(delivery['id']),  # 🔧 parcelId 추가!
+                "name": delivery.get('productName', ''),
+                "productName": delivery.get('productName', ''),
                 "address": delivery['recipientAddr'],
                 "location_name": location_name,
-                "productName": delivery['productName'],
                 "recipientName": delivery.get('recipientName', ''),
                 "recipientPhone": delivery.get('recipientPhone', '')
             })
         
-        # 매트릭스 계산 후 LKH 호출
-        coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
-        time_matrix, _ = get_time_distance_matrix(coords, COSTING_MODEL)
-        
-        if time_matrix is not None:
-            # LKH 서비스 직접 호출
-            response = requests.post(
-                LKH_SERVICE_URL,
-                json={"matrix": time_matrix.tolist()}
+        # 배달 장소가 1개면 TSP 계산 없이 바로 선택
+        if len(delivery_locations) == 1:
+            next_location = delivery_locations[0]
+            
+            route_info = get_turn_by_turn_route(
+                current_location,
+                {"lat": next_location["lat"], "lon": next_location["lon"]},
+                costing=COSTING_MODEL
             )
             
-            if response.status_code == 200:
-                result = response.json()
-                tour = result.get("tour")
-                
-                if tour and len(tour) > 1:
-                    next_idx = tour[1]  # 현재 다음 위치
-                    next_location = locations[next_idx]
-                    
-                    route = get_turn_by_turn_route(
-                        current_location,
-                        {"lat": next_location["lat"], "lon": next_location["lon"]},
-                        COSTING_MODEL
-                    )
-                    
-                    # waypoints 및 coordinates 추출
-                    waypoints, coordinates = extract_waypoints_from_route(route)
-                    if not waypoints:
-                        waypoints = [
-                            {
-                                "lat": current_location["lat"],
-                                "lon": current_location["lon"],
-                                "name": current_location.get("name", "현재위치"),
-                                "instruction": "배달 시작"
-                            },
-                            {
-                                "lat": next_location["lat"],
-                                "lon": next_location["lon"],
-                                "name": next_location.get("location_name", next_location["productName"]),
-                                "instruction": "배달지 도착"
-                            }
-                        ]
-                        coordinates = [
-                            {"lat": current_location["lat"], "lon": current_location["lon"]},
-                            {"lat": next_location["lat"], "lon": next_location["lon"]}
-                        ]
-                    
-                    if route and 'trip' in route:
-                        route['waypoints'] = waypoints
-                        route['coordinates'] = coordinates
-                    
-                    return jsonify({
-                        "status": "success",
-                        "next_destination": next_location,
-                        "route": route,
-                        "is_last": False,
-                        "remaining": len(pending),
-                        "geocoding_method": "kakao"
-                    }), 200
-        
-        # 문제가 있으면 첫 번째로
-        next_location = locations[1]
-        route = get_turn_by_turn_route(
-            current_location,
-            {"lat": next_location["lat"], "lon": next_location["lon"]},
-            COSTING_MODEL
-        )
-        
-        # waypoints 및 coordinates 추출
-        waypoints, coordinates = extract_waypoints_from_route(route)
-        if not waypoints:
-            waypoints = [
-                {
-                    "lat": current_location["lat"],
-                    "lon": current_location["lon"],
-                    "name": current_location.get("name", "현재위치"),
-                    "instruction": "배달 시작"
-                },
-                {
+            # waypoints 및 coordinates 추출
+            waypoints, coordinates = extract_waypoints_from_route(route_info)
+            if not waypoints:
+                waypoints = [
+                    {
+                        "lat": current_location["lat"],
+                        "lon": current_location["lon"],
+                        "name": current_location.get("name", "출발지"),
+                        "instruction": "배달 시작"
+                    },
+                    {
+                        "lat": next_location["lat"],
+                        "lon": next_location["lon"],
+                        "name": next_location.get("location_name", next_location["productName"]),
+                        "instruction": "목적지 도착"
+                    }
+                ]
+                coordinates = [
+                    {"lat": current_location["lat"], "lon": current_location["lon"]},
+                    {"lat": next_location["lat"], "lon": next_location["lon"]}
+                ]
+            
+            if route_info and 'trip' in route_info:
+                route_info['waypoints'] = waypoints
+                route_info['coordinates'] = coordinates
+            
+            return jsonify({
+                "status": "success",
+                "next_destination": {
                     "lat": next_location["lat"],
                     "lon": next_location["lon"],
-                    "name": next_location.get("location_name", next_location.get("productName", "배달지")),
-                    "instruction": "배달지 도착"
-                }
-            ]
-            coordinates = [
-                {"lat": current_location["lat"], "lon": current_location["lon"]},
-                {"lat": next_location["lat"], "lon": next_location["lon"]}
-            ]
+                    "delivery_id": next_location.get("delivery_id"),
+                    "parcelId": next_location.get("parcelId"),  # 🔧 parcelId!
+                    "name": next_location.get("productName"),
+                    "productName": next_location.get("productName"),
+                    "address": next_location.get("address"),
+                    "location_name": next_location.get("location_name"),
+                    "recipientName": next_location.get("recipientName"),
+                    "recipientPhone": next_location.get("recipientPhone")
+                },
+                "route": route_info,
+                "is_last": False,
+                "remaining": len(pending_deliveries),
+                "geocoding_method": "kakao"
+            }), 200
         
-        if route and 'trip' in route:
-            route['waypoints'] = waypoints
-            route['coordinates'] = coordinates
+        # 🔧 배달 장소가 2개 이상이면 TSP 계산
+        if len(delivery_locations) > 1:
+            # 현재 위치에서 각 배달 장소까지의 거리를 포함한 매트릭스 계산
+            all_coords = [{"lat": current_location["lat"], "lon": current_location["lon"]}]
+            all_coords.extend([{"lat": loc["lat"], "lon": loc["lon"]} for loc in delivery_locations])
+            
+            time_matrix, _ = get_time_distance_matrix(all_coords, costing=COSTING_MODEL)
+            
+            if time_matrix is not None:
+                # LKH로 최적 경로 계산
+                response = requests.post(
+                    LKH_SERVICE_URL,
+                    json={"matrix": time_matrix.tolist()}
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    optimal_tour = result.get("tour")
+                    
+                    if optimal_tour and len(optimal_tour) > 1:
+                        # 시작점(0)이 tour에서 몇 번째인지 찾기
+                        start_pos = optimal_tour.index(0)
+                        # 그 다음 위치 선택
+                        next_pos = (start_pos + 1) % len(optimal_tour)
+                        next_idx = optimal_tour[next_pos]
+                        
+                        # next_idx가 0이면 (현재 위치면) 그 다음 선택
+                        if next_idx == 0:
+                            next_pos = (start_pos + 2) % len(optimal_tour)
+                            next_idx = optimal_tour[next_pos]
+                        
+                        # delivery_locations에서 선택 (인덱스 조정: -1)
+                        delivery_idx = next_idx - 1
+                        if 0 <= delivery_idx < len(delivery_locations):
+                            next_location = delivery_locations[delivery_idx]
+                            
+                            route_info = get_turn_by_turn_route(
+                                current_location,
+                                {"lat": next_location["lat"], "lon": next_location["lon"]},
+                                costing=COSTING_MODEL
+                            )
+                            
+                            # waypoints 및 coordinates 추출
+                            waypoints, coordinates = extract_waypoints_from_route(route_info)
+                            if not waypoints:
+                                waypoints = [
+                                    {
+                                        "lat": current_location["lat"],
+                                        "lon": current_location["lon"],
+                                        "name": current_location.get("name", "출발지"),
+                                        "instruction": "배달 시작"
+                                    },
+                                    {
+                                        "lat": next_location["lat"],
+                                        "lon": next_location["lon"],
+                                        "name": next_location.get("location_name", next_location["productName"]),
+                                        "instruction": "목적지 도착"
+                                    }
+                                ]
+                                coordinates = [
+                                    {"lat": current_location["lat"], "lon": current_location["lon"]},
+                                    {"lat": next_location["lat"], "lon": next_location["lon"]}
+                                ]
+                            
+                            if route_info and 'trip' in route_info:
+                                route_info['waypoints'] = waypoints
+                                route_info['coordinates'] = coordinates
+                            
+                            return jsonify({
+                                "status": "success",
+                                "next_destination": {
+                                    "lat": next_location["lat"],
+                                    "lon": next_location["lon"],
+                                    "delivery_id": next_location.get("delivery_id"),
+                                    "parcelId": next_location.get("parcelId"),  # 🔧 parcelId!
+                                    "name": next_location.get("productName"),
+                                    "productName": next_location.get("productName"),
+                                    "address": next_location.get("address"),
+                                    "location_name": next_location.get("location_name"),
+                                    "recipientName": next_location.get("recipientName"),
+                                    "recipientPhone": next_location.get("recipientPhone")
+                                },
+                                "route": route_info,
+                                "is_last": False,
+                                "remaining": len(pending_deliveries),
+                                "geocoding_method": "kakao"
+                            }), 200
         
+        # 🔧 fallback: 첫 번째 배달 장소 선택
+        if delivery_locations:
+            next_location = delivery_locations[0]
+            
+            route_info = get_turn_by_turn_route(
+                current_location,
+                {"lat": next_location["lat"], "lon": next_location["lon"]},
+                costing=COSTING_MODEL
+            )
+            
+            # waypoints 및 coordinates 추출
+            waypoints, coordinates = extract_waypoints_from_route(route_info)
+            if not waypoints:
+                waypoints = [
+                    {
+                        "lat": current_location["lat"],
+                        "lon": current_location["lon"],
+                        "name": current_location.get("name", "출발지"),
+                        "instruction": "출발"
+                    },
+                    {
+                        "lat": next_location["lat"],
+                        "lon": next_location["lon"],
+                        "name": next_location.get("location_name", next_location.get("productName", "목적지")),
+                        "instruction": "도착"
+                    }
+                ]
+                coordinates = [
+                    {"lat": current_location["lat"], "lon": current_location["lon"]},
+                    {"lat": next_location["lat"], "lon": next_location["lon"]}
+                ]
+            
+            if route_info and 'trip' in route_info:
+                route_info['waypoints'] = waypoints
+                route_info['coordinates'] = coordinates
+            
+            return jsonify({
+                "status": "success",
+                "next_destination": {
+                    "lat": next_location["lat"],
+                    "lon": next_location["lon"],
+                    "delivery_id": next_location.get("delivery_id"),
+                    "parcelId": next_location.get("parcelId"),  # 🔧 parcelId!
+                    "name": next_location.get("productName"),
+                    "productName": next_location.get("productName"),
+                    "address": next_location.get("address"),
+                    "location_name": next_location.get("location_name"),
+                    "recipientName": next_location.get("recipientName"),
+                    "recipientPhone": next_location.get("recipientPhone")
+                },
+                "route": route_info,
+                "is_last": False,
+                "remaining": len(pending_deliveries),
+                "geocoding_method": "kakao"
+            }), 200
+        
+        # 마지막 fallback: 허브로
         return jsonify({
-            "status": "success",
-            "next_destination": next_location,
-            "route": route,
-            "is_last": False,
-            "remaining": len(pending),
-            "geocoding_method": "kakao"
+            "status": "return_to_hub",
+            "message": "배달할 장소가 없습니다. 허브로 복귀해주세요.",
+            "next_destination": HUB_LOCATION,
+            "is_last": True,
+            "remaining": 0,
+            "current_location": current_location
         }), 200
         
     except Exception as e:
-        logging.error(f"Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
+        logging.error(f"Error getting next delivery: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+        
 @app.route('/api/delivery/complete', methods=['POST'])
 @auth_required
 def complete_delivery():
