@@ -26,7 +26,7 @@ KAKAO_ADDRESS_API = "https://dapi.kakao.com/v2/local/search/address.json"
 KAKAO_KEYWORD_API = "https://dapi.kakao.com/v2/local/search/keyword.json"
 
 # 글로벌 변수
-traffic_data = {}  # OSM Way ID -> 속도 매핑
+traffic_data = {}  # OSM Way ID -> 속도 매핑 (km/h)
 service_to_osm = {}  # 서비스링크 -> OSM 매핑
 
 class TrafficProxy:
@@ -130,7 +130,7 @@ class TrafficProxy:
                                 # OSM Way ID로 변환
                                 if link_id in service_to_osm:
                                     osm_id = service_to_osm[link_id]
-                                    new_traffic_data[osm_id] = speed
+                                    new_traffic_data[osm_id] = speed  # 실제 속도 그대로 저장
                                     success_count += 1
                                     if success_count % 100 == 0:
                                         logger.info(f"수집 중... {success_count}개 완료")
@@ -149,64 +149,64 @@ class TrafficProxy:
         # 전역 변수 업데이트
         traffic_data = new_traffic_data
         logger.info(f"교통 데이터 수집 완료: {len(traffic_data)}개 (성공: {success_count}, 실패: {fail_count})")
-        elapsed_time = total_links * (self.api_delay + 0.1)
-        logger.info(f"예상 수집 시간: {elapsed_time:.0f}초 ({elapsed_time/60:.1f}분)")
-    
-    def modify_route_request(self, request_data):
-        """라우팅 요청 수정 - 실제 교통 데이터가 있을 때만"""
-        # 🔧 간단하게: 실제 교통 데이터가 있으면 표시만
+        
+        # 교통 데이터 분포 로깅
         if traffic_data:
-            request_data['traffic_applied'] = True
-        return request_data
-    
-    def calculate_real_time(self, route_response):
-        """🔧 핵심 수정: 실제 매핑된 구간에만 교통 데이터 적용, 나머지는 기본 Valhalla"""
-        if 'trip' not in route_response:
-            return route_response
-        
-        # 🔧 실제 교통 데이터가 없으면 기본 Valhalla 결과 그대로 사용
-        if not traffic_data:
-            logging.info("실제 교통 데이터 없음 - 기본 Valhalla 결과 사용")
-            if 'trip' in route_response:
-                route_response['trip']['has_traffic'] = False
-                route_response['trip']['traffic_data_count'] = 0
-            return route_response
-        
-        # 🔧 실제 교통 데이터가 있어도 매우 제한적으로만 적용
-        # 심각한 교통체증이 있는 경우에만 시간 조정
-        if 'legs' in route_response['trip']:
             speeds = list(traffic_data.values())
-            if speeds:
-                avg_speed = sum(speeds) / len(speeds)
+            avg_speed = sum(speeds) / len(speeds)
+            min_speed = min(speeds)
+            max_speed = max(speeds)
+            logger.info(f"교통 속도 분포: 평균 {avg_speed:.1f}km/h, 최소 {min_speed:.1f}km/h, 최대 {max_speed:.1f}km/h")
+    
+    def build_traffic_speed_map(self):
+        """🔧 핵심: 서울시 실시간 속도를 Valhalla 형식으로 변환"""
+        if not traffic_data:
+            return {}
+        
+        # Valhalla가 인식할 수 있는 속도 맵 구성
+        speed_map = {}
+        for osm_way_id, speed_kmh in traffic_data.items():
+            # OSM Way ID를 정수로 변환
+            try:
+                way_id = int(osm_way_id)
+                # km/h를 m/s로 변환 (Valhalla 내부 단위)
+                speed_ms = speed_kmh / 3.6
+                speed_map[way_id] = speed_ms
+            except (ValueError, TypeError):
+                continue
+        
+        logger.info(f"Valhalla용 속도 맵 생성: {len(speed_map)}개 도로")
+        return speed_map
+    
+    def modify_request_for_traffic(self, request_data):
+        """🔧 핵심: use_live_traffic=true면 실시간 속도 데이터 추가"""
+        costing_options = request_data.get('costing_options', {})
+        costing = request_data.get('costing', 'auto')
+        
+        use_traffic = costing_options.get(costing, {}).get('use_live_traffic', False)
+        
+        if use_traffic and traffic_data:
+            # 실시간 속도 맵 생성
+            speed_map = self.build_traffic_speed_map()
+            
+            if speed_map:
+                # Valhalla에 속도 오버라이드 전달
+                if 'costing_options' not in request_data:
+                    request_data['costing_options'] = {}
+                if costing not in request_data['costing_options']:
+                    request_data['costing_options'][costing] = {}
                 
-                # 🔧 심각한 교통체증 (평균 20km/h 이하)일 때만 적용
-                if avg_speed < 20:
-                    factor = 1.5  # 고정 1.5배로 간단하게
-                    
-                    if 'summary' in route_response['trip']:
-                        original_time = route_response['trip']['summary'].get('time', 0)
-                        route_response['trip']['summary']['time'] = original_time * factor
-                        route_response['trip']['summary']['traffic_time'] = original_time * factor
-                    
-                    for leg in route_response['trip']['legs']:
-                        if 'summary' in leg:
-                            leg_time = leg['summary'].get('time', 0)
-                            leg['summary']['time'] = leg_time * factor
-                        
-                        for maneuver in leg.get('maneuvers', []):
-                            maneuver_time = maneuver.get('time', 0)
-                            maneuver['time'] = maneuver_time * factor
-                    
-                    logger.info(f"심각한 교통체증 감지 (평균 {avg_speed:.1f}km/h) - 시간 1.5배 적용")
-                else:
-                    logger.info(f"교통 상황 양호 (평균 {avg_speed:.1f}km/h) - 기본 Valhalla 시간 사용")
+                # 🔧 실시간 속도 데이터를 Valhalla에 직접 전달
+                request_data['costing_options'][costing]['speed_overrides'] = speed_map
+                request_data['costing_options'][costing]['use_live_traffic'] = True
+                
+                logger.info(f"실시간 교통 데이터 적용: {len(speed_map)}개 도로")
+            else:
+                logger.warning("실시간 교통 데이터가 있지만 유효한 속도 맵을 생성할 수 없음")
+        else:
+            logger.info("기본 Valhalla 데이터 사용 (실시간 교통 미적용)")
         
-        # 메타데이터만 추가
-        if 'trip' in route_response:
-            route_response['trip']['has_traffic'] = True
-            route_response['trip']['traffic_data_count'] = len(traffic_data)
-        
-        return route_response
+        return request_data
     
     def start_traffic_updater(self):
         """백그라운드에서 주기적으로 교통 데이터 업데이트"""
@@ -332,17 +332,17 @@ def status():
 
 @app.route('/route', methods=['POST'])
 def proxy_route():
-    """라우팅 요청 프록시 - 상세 정보 보존"""
+    """🔧 핵심: 실시간 속도 데이터를 Valhalla에 직접 전달"""
     try:
         # 원본 요청 받기
         original_request = request.json
         logger.info(f"Route request received")
         logger.info(f"교통 데이터 수집: {len(traffic_data)}개")
         
-        # 요청 수정
-        modified_request = proxy.modify_route_request(original_request.copy())
+        # 🔧 실시간 교통 데이터 추가 (use_live_traffic=true면)
+        modified_request = proxy.modify_request_for_traffic(original_request.copy())
         
-        # Valhalla로 전달
+        # Valhalla로 전달 - 실시간 속도 데이터 포함
         response = requests.post(
             f"{VALHALLA_URL}/route",
             json=modified_request,
@@ -350,23 +350,12 @@ def proxy_route():
         )
         
         if response.status_code == 200:
-            # 🔧 수정: 전체 응답 보존하면서 교통 정보만 추가
             result = response.json()
             
-            # 기본 교통 정보 적용
-            result = proxy.calculate_real_time(result)
-            
-            # 트래픽 정보 추가
+            # 메타데이터 추가
             if 'trip' in result:
-                result['trip']['has_traffic'] = True
                 result['trip']['traffic_data_count'] = len(traffic_data)
-                
-                # 🔧 상세 정보 로깅
-                if 'legs' in result['trip']:
-                    logger.info(f"Route response: {len(result['trip']['legs'])} legs")
-                    if result['trip']['legs']:
-                        maneuvers_count = sum(len(leg.get('maneuvers', [])) for leg in result['trip']['legs'])
-                        logger.info(f"Total maneuvers: {maneuvers_count}")
+                result['trip']['has_traffic'] = len(traffic_data) > 0
             
             return jsonify(result)
         else:
@@ -379,15 +368,18 @@ def proxy_route():
 
 @app.route('/matrix', methods=['POST'])
 def proxy_matrix_endpoint():
-    """매트릭스 요청 프록시 (/matrix 엔드포인트 - get_valhalla_matrix.py가 사용)"""
+    """🔧 핵심: 매트릭스 계산에도 실시간 교통 데이터 적용"""
     try:
         original_request = request.json
         logger.info("Matrix request received")
         
+        # 🔧 매트릭스 요청에도 실시간 교통 데이터 추가
+        modified_request = proxy.modify_request_for_traffic(original_request.copy())
+        
         # Valhalla의 sources_to_targets로 전달
         response = requests.post(
             f"{VALHALLA_URL}/sources_to_targets",
-            json=original_request,
+            json=modified_request,
             timeout=60
         )
         
@@ -408,10 +400,13 @@ def proxy_matrix():
     try:
         original_request = request.json
         
+        # 🔧 매트릭스에도 실시간 교통 데이터 적용
+        modified_request = proxy.modify_request_for_traffic(original_request.copy())
+        
         # Valhalla로 직접 전달
         response = requests.post(
             f"{VALHALLA_URL}/sources_to_targets",
-            json=original_request,
+            json=modified_request,
             timeout=60
         )
         
@@ -424,9 +419,21 @@ def proxy_matrix():
 @app.route('/health', methods=['GET'])
 def health():
     """헬스체크"""
+    traffic_stats = {}
+    if traffic_data:
+        speeds = list(traffic_data.values())
+        traffic_stats = {
+            "avg_speed": sum(speeds) / len(speeds),
+            "min_speed": min(speeds),
+            "max_speed": max(speeds),
+            "slow_roads": len([s for s in speeds if s < 20]),
+            "fast_roads": len([s for s in speeds if s > 50])
+        }
+    
     return jsonify({
         "status": "healthy",
         "traffic_data_count": len(traffic_data),
+        "traffic_stats": traffic_stats,
         "valhalla_url": VALHALLA_URL,
         "kakao_api_configured": bool(KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE'),
         "geocoding_method": "kakao"
@@ -485,32 +492,35 @@ def kakao_geocoding_search():
         }
         return jsonify(result), 200
 
-# 🔧 디버깅용 카카오 테스트 엔드포인트
-@app.route('/test-kakao', methods=['GET'])
-def test_kakao_api():
-    """카카오 API 테스트"""
-    try:
-        test_address = request.args.get('address', '서울특별시 마포구 홍대입구역로 123')
-        
-        lat, lon, location_name, confidence = proxy.kakao_geocoding(test_address)
-        
-        return jsonify({
-            "input": test_address,
-            "output": {
-                "lat": lat,
-                "lon": lon,
-                "location_name": location_name,
-                "confidence": confidence
-            },
-            "api_configured": bool(KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE'),
-            "status": "success"
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "status": "failed"
-        }), 500
+# 🔧 실시간 교통 데이터 확인용 엔드포인트
+@app.route('/traffic-debug', methods=['GET'])
+def traffic_debug():
+    """실시간 교통 데이터 확인"""
+    if not traffic_data:
+        return jsonify({"message": "교통 데이터 없음"}), 200
+    
+    speeds = list(traffic_data.values())
+    sample_data = dict(list(traffic_data.items())[:10])  # 처음 10개만
+    
+    # 속도 분포
+    speed_distribution = {
+        "very_slow": len([s for s in speeds if s < 15]),    # 15km/h 미만
+        "slow": len([s for s in speeds if 15 <= s < 30]),   # 15-30km/h  
+        "normal": len([s for s in speeds if 30 <= s < 50]), # 30-50km/h
+        "fast": len([s for s in speeds if s >= 50])         # 50km/h 이상
+    }
+    
+    return jsonify({
+        "total_roads": len(traffic_data),
+        "speed_stats": {
+            "avg": sum(speeds) / len(speeds),
+            "min": min(speeds),
+            "max": max(speeds)
+        },
+        "speed_distribution": speed_distribution,
+        "sample_data": sample_data,
+        "message": "서울시 실시간 교통 데이터 - 그대로 Valhalla에 전달"
+    })
 
 # 추가: Valhalla가 지원하는 모든 엔드포인트를 프록시로 전달
 @app.route('/<path:path>', methods=['GET', 'POST'])
@@ -533,6 +543,6 @@ def proxy_all(path):
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    logger.info("카카오 지오코딩 전용 Traffic Proxy 시작")
+    logger.info("진짜 간단한 Traffic Proxy 시작 - 받은 거 그대로 넘겨주기")
     logger.info(f"카카오 API 설정: {'OK' if KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE' else 'API KEY 필요'}")
     app.run(host='0.0.0.0', port=8003, debug=False)
