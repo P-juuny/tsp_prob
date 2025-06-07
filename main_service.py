@@ -219,6 +219,7 @@ def get_driver_parcels_from_db(driver_id):
            FROM Parcel p
            LEFT JOIN User o ON p.ownerId = o.id
            WHERE p.pickupDriverId = %s AND p.isDeleted = 0
+           AND p.status = 'PICKUP_PENDING'
            AND (
                p.pickupScheduledDate IS NULL OR 
                DATE(p.pickupScheduledDate) <= %s
