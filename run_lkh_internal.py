@@ -26,35 +26,25 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
     if n == 1:
         return [0], 0.0
 
-    # 🔧 노드 수에 따른 동적 파라미터 설정
+    # 🔧 10개 노드까지 최적화된 파라미터 설정
     if n <= 5:
-        # 매우 작은 경우: 빠른 실행
-        runs = max(3, runs)
-        time_limit = 15
-        max_trials = 1000
-    elif n <= 10:
-        # 작은 경우
-        runs = max(5, runs)
-        time_limit = 30
-        max_trials = 3000
-    elif n <= 20:
-        # 중간 경우
         runs = max(8, runs)
-        time_limit = 60
-        max_trials = 8000
-    elif n <= 50:
-        # 큰 경우
-        runs = max(12, runs)
-        time_limit = 120
-        max_trials = 15000
-    else:
-        # 매우 큰 경우
+        time_limit = 15
+        max_trials = 3000
+    elif n <= 10:
         runs = max(15, runs)
-        time_limit = 300
-        max_trials = 25000
+        time_limit = 30
+        max_trials = 8000
+    elif n <= 20:
+        runs = max(20, runs)
+        time_limit = 45
+        max_trials = 12000
+    else:
+        runs = max(25, runs)
+        time_limit = 90
+        max_trials = 20000
 
     # LKH는 정수 가중치를 선호하므로, 초 단위 시간을 정수로 변환
-    # 소수점 이하는 버리거나 반올림할 수 있음 (여기서는 반올림)
     int_time_matrix = np.round(time_matrix).astype(int)
 
     # LKH 입력 파일 생성 (임시 파일 사용)
@@ -90,51 +80,39 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
                 f.write("-1\n")
                 f.write("EOF\n")
 
-        # 3. 🔧 최적화된 Parameter file (.par) 생성
+        # 3. 🔧 간소화된 Parameter file (.par) 생성
         with open(param_filename, 'w') as f:
             f.write(f"PROBLEM_FILE = {problem_filename}\n")
             f.write(f"OUTPUT_TOUR_FILE = {output_filename}\n")
             f.write(f"RUNS = {runs}\n")
-            f.write(f"TRACE_LEVEL = 1\n")
             f.write(f"TIME_LIMIT = {time_limit}\n")
             f.write(f"MAX_TRIALS = {max_trials}\n")
+            f.write("TRACE_LEVEL = 1\n")
             
-            # 🔧 성능 최적화 파라미터
-            if n <= 10:
-                # 작은 인스턴스: 기본 설정
-                f.write("INITIAL_PERIOD = 100\n")
+            # 🔧 10개 노드까지 최적화된 품질 파라미터
+            f.write("INITIAL_TOUR_ALGORITHM = NEAREST_NEIGHBOR\n")
+            f.write("MOVE_TYPE = 5\n")
+            f.write("PATCHING_C = 3\n")
+            
+            if n <= 5:
                 f.write("MAX_CANDIDATES = 5\n")
-            elif n <= 30:
-                # 중간 인스턴스: POPMUSIC 사용
-                f.write("CANDIDATE_SET_TYPE = POPMUSIC\n")
-                f.write("POPMUSIC_SAMPLE_SIZE = 10\n")
-                f.write("POPMUSIC_SOLUTIONS = 50\n")
-                f.write("POPMUSIC_MAX_NEIGHBORS = 5\n")
-                f.write("POPMUSIC_TRIALS = 1\n")
-                f.write("INITIAL_PERIOD = 50\n")
+                f.write("INITIAL_PERIOD = 100\n")
+            elif n <= 10:
+                f.write("MAX_CANDIDATES = 8\n")
+                f.write("INITIAL_PERIOD = 80\n")
+                f.write("KICK_TYPE = 4\n")
             else:
-                # 큰 인스턴스: 고급 최적화
-                f.write("CANDIDATE_SET_TYPE = POPMUSIC\n")
-                f.write("POPMUSIC_SAMPLE_SIZE = 15\n")
-                f.write("POPMUSIC_SOLUTIONS = 100\n")
-                f.write("POPMUSIC_MAX_NEIGHBORS = 8\n")
-                f.write("POPMUSIC_TRIALS = 2\n")
-                f.write("INITIAL_PERIOD = 30\n")
-                f.write("SUBGRADIENT = YES\n")
-                f.write("ASCENT_CANDIDATES = 50\n")
-                f.write("EXCESS = 1.0/DIM\n")
+                f.write("MAX_CANDIDATES = 10\n")
+                f.write("INITIAL_PERIOD = 50\n")
+                f.write("KICK_TYPE = 4\n")
+                f.write("KICKS = 1\n")
             
             if initial_tour_filename and initial_tour:
                 f.write(f"INITIAL_TOUR_FILE = {initial_tour_filename}\n")
 
         # 4. LKH 실행
         try:
-            # print(f"Running LKH with command: {LKH_EXECUTABLE} {param_filename}")
-            process = subprocess.run([LKH_EXECUTABLE, param_filename], capture_output=True, text=True, check=True, timeout=time_limit + 60) # LKH 실행 타임아웃 추가
-            # print("LKH stdout:")
-            # print(process.stdout)
-            # print("LKH stderr:")
-            # print(process.stderr)
+            process = subprocess.run([LKH_EXECUTABLE, param_filename], capture_output=True, text=True, check=True, timeout=time_limit + 30)
 
         except FileNotFoundError:
             print(f"Error: LKH executable not found at {LKH_EXECUTABLE}")
@@ -155,19 +133,17 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
             with open(output_filename, 'r') as f:
                 lines = f.readlines()
 
-            # 비용 파싱 (Comment 라인 또는 표준 출력에서 찾기)
+            # 비용 파싱
             optimal_cost = -1.0
             cost_line = next((line for line in process.stdout.split('\n') if "Cost.min =" in line or "Cost =" in line), None)
             if cost_line:
                  try:
-                     # "Cost.min = 12345" 또는 "Cost = 12345" 형태에서 숫자 추출
-                    optimal_cost_str = cost_line.split('=')[-1].strip()
-                    optimal_cost = float(optimal_cost_str)
+                     optimal_cost_str = cost_line.split('=')[-1].strip()
+                     optimal_cost = float(optimal_cost_str)
                  except ValueError:
                     print(f"Warning: Could not parse cost from LKH output line: {cost_line}")
             else:
                  print("Warning: Could not find cost information in LKH standard output.")
-                 # 비용을 직접 계산해야 할 수도 있음 (파싱된 경로 기준)
 
             # 경로 파싱
             tour_section_start = -1
@@ -196,16 +172,14 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
                  print(f"Error: No valid tour found in {output_filename}")
                  return None, None
 
-            # 경로 유효성 검사 (모든 노드가 포함되었는지)
+            # 경로 유효성 검사
             if len(optimal_tour) != n or set(optimal_tour) != set(range(n)):
                  print(f"Error: Parsed tour is invalid. Expected {n} unique nodes, got {len(optimal_tour)}: {optimal_tour}")
-                 # 문제가 심각하면 None 반환, 아니면 경고만 출력
-                 # return None, None # 엄격하게 처리
 
-            # 비용이 파싱되지 않았고 경로가 유효하다면, 경로 기반으로 비용 재계산
-            calculated_cost = 0.0
-            if optimal_cost < 0 and len(optimal_tour) == n :
+            # 비용이 파싱되지 않았으면 경로 기반으로 비용 재계산
+            if optimal_cost < 0 and len(optimal_tour) == n:
                 print("Recalculating tour cost from the matrix...")
+                calculated_cost = 0.0
                 for i in range(n):
                     from_node = optimal_tour[i]
                     to_node = optimal_tour[(i + 1) % n] # 마지막 노드에서 시작 노드로 돌아옴
