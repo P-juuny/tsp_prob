@@ -90,7 +90,7 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
             f.write("TRACE_LEVEL = 1\n")
             
             # 🔧 10개 노드까지 최적화된 품질 파라미터
-            f.write("INITIAL_TOUR_ALGORITHM = NEAREST_NEIGHBOR\n")
+            f.write("INITIAL_TOUR_ALGORITHM = NEAREST-NEIGHBOR\n")
             f.write("MOVE_TYPE = 5\n")
             f.write("PATCHING_C = 3\n")
             
