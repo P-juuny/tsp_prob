@@ -7,7 +7,6 @@ import csv
 import threading
 import time
 import xml.etree.ElementTree as ET
-import urllib.parse
 
 app = Flask(__name__)
 
@@ -19,11 +18,6 @@ logger = logging.getLogger(__name__)
 VALHALLA_URL = os.environ.get('VALHALLA_URL', 'http://valhalla:8002')
 SEOUL_API_KEY = os.environ.get('SEOUL_API_KEY', '7a7a43624a736b7a32385a7a617270')
 MAPPING_FILE = '/data/service_to_osm_mapping.csv'
-
-# 🔧 카카오 API 설정 추가
-KAKAO_API_KEY = os.environ.get('KAKAO_API_KEY', 'YOUR_KAKAO_API_KEY_HERE')
-KAKAO_ADDRESS_API = "https://dapi.kakao.com/v2/local/search/address.json"
-KAKAO_KEYWORD_API = "https://dapi.kakao.com/v2/local/search/keyword.json"
 
 # 글로벌 변수
 traffic_data = {}  # OSM Way ID -> 속도 매핑
@@ -162,43 +156,19 @@ class TrafficProxy:
         return request_data
     
     def calculate_real_time(self, route_response):
-        """실제 교통 속도를 반영한 시간 재계산 - 상세 정보 보존"""
+        """실제 교통 속도를 반영한 시간 재계산"""
         if 'trip' not in route_response:
             return route_response
         
-        # 🔧 수정: legs와 maneuvers 정보를 보존하면서 시간만 조정
-        if traffic_data and 'legs' in route_response['trip']:
+        # 단순화: 전체 시간에 평균 속도 비율 적용
+        if traffic_data:
             avg_speed = sum(traffic_data.values()) / len(traffic_data)
-            
             if avg_speed < 50:  # 50km/h 이하면 시간 증가
                 factor = 50 / avg_speed
-                
-                # Trip summary 조정
                 if 'summary' in route_response['trip']:
                     original_time = route_response['trip']['summary'].get('time', 0)
                     route_response['trip']['summary']['time'] = original_time * factor
                     route_response['trip']['summary']['traffic_time'] = original_time * factor
-                
-                # 각 leg별로 시간 조정 (상세 정보는 보존)
-                for leg in route_response['trip']['legs']:
-                    if 'summary' in leg:
-                        leg_time = leg['summary'].get('time', 0)
-                        leg['summary']['time'] = leg_time * factor
-                    
-                    # 각 maneuver별로 시간 조정 (instruction은 보존)
-                    for maneuver in leg.get('maneuvers', []):
-                        maneuver_time = maneuver.get('time', 0)
-                        maneuver['time'] = maneuver_time * factor
-        else:
-            # 기존 로직 (legs가 없는 경우)
-            if traffic_data:
-                avg_speed = sum(traffic_data.values()) / len(traffic_data)
-                if avg_speed < 50:  # 50km/h 이하면 시간 증가
-                    factor = 50 / avg_speed
-                    if 'summary' in route_response['trip']:
-                        original_time = route_response['trip']['summary'].get('time', 0)
-                        route_response['trip']['summary']['time'] = original_time * factor
-                        route_response['trip']['summary']['traffic_time'] = original_time * factor
         
         return route_response
     
@@ -226,92 +196,6 @@ class TrafficProxy:
         thread.start()
         logger.info("교통 데이터 자동 업데이트 스레드 시작됨")
 
-    # 🔧 카카오 지오코딩 함수들 추가
-    def kakao_geocoding(self, address):
-        """카카오 API로 주소를 위도/경도로 변환"""
-        try:
-            headers = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
-            
-            # 1차: 주소 검색 API 시도
-            params = {"query": address}
-            response = requests.get(KAKAO_ADDRESS_API, headers=headers, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                documents = data.get("documents", [])
-                
-                if documents:
-                    doc = documents[0]  # 첫 번째 결과 사용
-                    lat = float(doc["y"])
-                    lon = float(doc["x"])
-                    address_name = doc.get("address_name", address)
-                    
-                    logger.info(f"카카오 주소 검색 성공: {address} -> ({lat}, {lon}) [{address_name}]")
-                    return lat, lon, address_name, 0.95
-            
-            # 2차: 주소 검색 실패시 키워드 검색 시도
-            response = requests.get(KAKAO_KEYWORD_API, headers=headers, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                documents = data.get("documents", [])
-                
-                if documents:
-                    doc = documents[0]  # 첫 번째 결과 사용
-                    lat = float(doc["y"])
-                    lon = float(doc["x"])
-                    place_name = doc.get("place_name", address)
-                    
-                    logger.info(f"카카오 키워드 검색 성공: {address} -> ({lat}, {lon}) [{place_name}]")
-                    return lat, lon, place_name, 0.85
-            
-            # 카카오 API 실패시 기본 좌표
-            logger.warning(f"카카오 지오코딩 실패, 기본 좌표 사용: {address}")
-            return self.get_default_coordinates_by_district(address)
-            
-        except Exception as e:
-            logger.error(f"카카오 지오코딩 오류: {e}")
-            return self.get_default_coordinates_by_district(address)
-
-    def get_default_coordinates_by_district(self, address):
-        """구별 기본 좌표 (카카오 API 실패시 사용)"""
-        district_coords = {
-            "강남구": (37.5172, 127.0473, "강남구 역삼동"),
-            "서초구": (37.4837, 127.0324, "서초구 서초동"),
-            "송파구": (37.5145, 127.1059, "송파구 잠실동"),
-            "강동구": (37.5301, 127.1238, "강동구 천호동"),
-            "성동구": (37.5634, 127.0369, "성동구 성수동"),
-            "광진구": (37.5384, 127.0822, "광진구 광장동"),
-            "동대문구": (37.5744, 127.0396, "동대문구 전농동"),
-            "중랑구": (37.6063, 127.0927, "중랑구 면목동"),
-            "종로구": (37.5735, 126.9790, "종로구 종로"),
-            "중구": (37.5641, 126.9979, "중구 명동"),
-            "용산구": (37.5311, 126.9810, "용산구 한강로"),
-            "성북구": (37.5894, 127.0167, "성북구 성북동"),
-            "강북구": (37.6396, 127.0253, "강북구 번동"),
-            "도봉구": (37.6687, 127.0472, "도봉구 방학동"),
-            "노원구": (37.6543, 127.0568, "노원구 상계동"),
-            "은평구": (37.6176, 126.9269, "은평구 불광동"),
-            "서대문구": (37.5791, 126.9368, "서대문구 신촌동"),
-            "마포구": (37.5638, 126.9084, "마포구 공덕동"),
-            "양천구": (37.5170, 126.8667, "양천구 목동"),
-            "강서구": (37.5509, 126.8496, "강서구 화곡동"),
-            "구로구": (37.4954, 126.8877, "구로구 구로동"),
-            "금천구": (37.4564, 126.8955, "금천구 가산동"),
-            "영등포구": (37.5263, 126.8966, "영등포구 영등포동"),
-            "동작구": (37.5124, 126.9393, "동작구 상도동"),
-            "관악구": (37.4784, 126.9516, "관악구 봉천동")
-        }
-        
-        for district, (lat, lon, name) in district_coords.items():
-            if district in address:
-                logger.info(f"기본 좌표 사용: {address} -> ({lat}, {lon}) [{name}]")
-                return lat, lon, name, 0.5
-        
-        # 서울시청 기본 좌표
-        logger.warning(f"구를 찾을 수 없어 서울시청 좌표 사용: {address}")
-        return 37.5665, 126.9780, "서울시청", 0.1
-
 proxy = TrafficProxy()
 
 @app.route('/status', methods=['GET'])
@@ -326,7 +210,7 @@ def status():
 
 @app.route('/route', methods=['POST'])
 def proxy_route():
-    """라우팅 요청 프록시 - 상세 정보 보존"""
+    """라우팅 요청 프록시"""
     try:
         # 원본 요청 받기
         original_request = request.json
@@ -344,27 +228,17 @@ def proxy_route():
         )
         
         if response.status_code == 200:
-            # 🔧 수정: 전체 응답 보존하면서 교통 정보만 추가
+            # 응답 수정
             result = response.json()
-            
-            # 기본 교통 정보 적용
             result = proxy.calculate_real_time(result)
             
             # 트래픽 정보 추가
             if 'trip' in result:
                 result['trip']['has_traffic'] = True
                 result['trip']['traffic_data_count'] = len(traffic_data)
-                
-                # 🔧 상세 정보 로깅
-                if 'legs' in result['trip']:
-                    logger.info(f"Route response: {len(result['trip']['legs'])} legs")
-                    if result['trip']['legs']:
-                        maneuvers_count = sum(len(leg.get('maneuvers', [])) for leg in result['trip']['legs'])
-                        logger.info(f"Total maneuvers: {maneuvers_count}")
             
             return jsonify(result)
         else:
-            logger.error(f"Valhalla error: {response.status_code}")
             return jsonify({"error": "Valhalla error"}), response.status_code
             
     except Exception as e:
@@ -421,90 +295,8 @@ def health():
     return jsonify({
         "status": "healthy",
         "traffic_data_count": len(traffic_data),
-        "valhalla_url": VALHALLA_URL,
-        "kakao_api_configured": bool(KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE'),
-        "geocoding_method": "kakao"
+        "valhalla_url": VALHALLA_URL
     })
-
-# 🔧 카카오 지오코딩 전용 search 엔드포인트
-@app.route('/search', methods=['GET'])
-def kakao_geocoding_search():
-    """카카오 API를 사용한 지오코딩 (search 엔드포인트)"""
-    try:
-        text = request.args.get('text', '')
-        logger.info(f"카카오 지오코딩 요청: {text}")
-        
-        if not text:
-            return jsonify({"error": "text parameter required"}), 400
-        
-        # 카카오 지오코딩 수행
-        lat, lon, location_name, confidence = proxy.kakao_geocoding(text)
-        
-        # Valhalla 형식으로 응답 구성
-        result = {
-            "features": [{
-                "geometry": {
-                    "coordinates": [lon, lat]
-                },
-                "properties": {
-                    "confidence": confidence,
-                    "display_name": location_name,
-                    "geocoding_method": "kakao"
-                }
-            }]
-        }
-        
-        if confidence >= 0.8:
-            logger.info(f"카카오 지오코딩 성공: {text} -> ({lat}, {lon}) 신뢰도: {confidence}")
-        else:
-            logger.warning(f"카카오 지오코딩 (낮은 신뢰도): {text} -> ({lat}, {lon}) 신뢰도: {confidence}")
-        
-        return jsonify(result), 200
-        
-    except Exception as e:
-        logger.error(f"카카오 지오코딩 오류: {e}")
-        
-        # 실패시 기본 좌표 (서울시청)
-        result = {
-            "features": [{
-                "geometry": {
-                    "coordinates": [126.9780, 37.5665]
-                },
-                "properties": {
-                    "confidence": 0.1,
-                    "display_name": "서울시청 (기본값)",
-                    "geocoding_method": "fallback"
-                }
-            }]
-        }
-        return jsonify(result), 200
-
-# 🔧 디버깅용 카카오 테스트 엔드포인트
-@app.route('/test-kakao', methods=['GET'])
-def test_kakao_api():
-    """카카오 API 테스트"""
-    try:
-        test_address = request.args.get('address', '서울특별시 마포구 홍대입구역로 123')
-        
-        lat, lon, location_name, confidence = proxy.kakao_geocoding(test_address)
-        
-        return jsonify({
-            "input": test_address,
-            "output": {
-                "lat": lat,
-                "lon": lon,
-                "location_name": location_name,
-                "confidence": confidence
-            },
-            "api_configured": bool(KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE'),
-            "status": "success"
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "status": "failed"
-        }), 500
 
 # 추가: Valhalla가 지원하는 모든 엔드포인트를 프록시로 전달
 @app.route('/<path:path>', methods=['GET', 'POST'])
@@ -527,6 +319,4 @@ def proxy_all(path):
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    logger.info("카카오 지오코딩 전용 Traffic Proxy 시작")
-    logger.info(f"카카오 API 설정: {'OK' if KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE' else 'API KEY 필요'}")
-    app.run(host='0.0.0.0', port=8003, debug=False)
+    app.run(host='0.0.0.0', port=8003, debug=False)  # debug=False로 변경
