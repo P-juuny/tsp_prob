@@ -207,57 +207,102 @@ def get_parcel_from_db(parcel_id):
    finally:
        conn.close()
 
+# ✅ 수정된 함수: 실시간으로 미완료 수거만 가져오기
+def get_real_pending_pickups(driver_id):
+    """실시간으로 미완료 수거만 가져오기"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            today = datetime.now(KST).date()
+            # ✅ 명확하게 미완료 상태만 쿼리
+            sql = """
+            SELECT p.*, 
+                   o.name as ownerName
+            FROM Parcel p
+            LEFT JOIN User o ON p.ownerId = o.id
+            WHERE p.pickupDriverId = %s 
+            AND p.status = 'PICKUP_PENDING'  -- ✅ 미완료만
+            AND p.isDeleted = 0
+            AND (
+                p.pickupScheduledDate IS NULL OR 
+                DATE(p.pickupScheduledDate) <= %s
+            )
+            ORDER BY p.createdAt DESC
+            """
+            cursor.execute(sql, (driver_id, today))
+            parcels = cursor.fetchall()
+            
+            # API 응답 형식에 맞게 변환
+            result = []
+            for p in parcels:
+                # 날짜 필드 처리
+                completed_at = p['pickupCompletedAt'].isoformat() if p['pickupCompletedAt'] else None
+                created_at = p['createdAt'].isoformat() if p['createdAt'] else None
+                
+                item = {
+                    'id': p['id'],
+                    'status': 'PENDING',
+                    'recipientAddr': p['recipientAddr'],
+                    'productName': p['productName'],
+                    'pickupCompletedAt': completed_at,
+                    'assignedAt': created_at,
+                    'ownerId': p['ownerId'],
+                    'ownerName': p.get('ownerName'),
+                    'size': p['size']
+                }
+                result.append(item)
+            
+            return result
+    except Exception as e:
+        logging.error(f"DB 쿼리 오류: {e}")
+        return []
+    finally:
+        conn.close()
+
 def get_driver_parcels_from_db(driver_id):
-   """DB에서 직접 기사 할당 소포 목록 가져오기 (오늘 처리할 것만)"""
-   conn = get_db_connection()
-   try:
-       with conn.cursor() as cursor:
-           today = datetime.now(KST).date()
-           sql = """
-           SELECT p.*, 
-                  o.name as ownerName
-           FROM Parcel p
-           LEFT JOIN User o ON p.ownerId = o.id
-           WHERE p.pickupDriverId = %s AND p.isDeleted = 0
-           AND p.status = 'PICKUP_PENDING'
-           AND (
-               p.pickupScheduledDate IS NULL OR 
-               DATE(p.pickupScheduledDate) <= %s
-           )
-           ORDER BY p.createdAt DESC
-           """
-           cursor.execute(sql, (driver_id, today))
-           parcels = cursor.fetchall()
-           
-           # API 응답 형식에 맞게 변환
-           result = []
-           for p in parcels:
-               # 상태값 변환 (DB의 ParcelStatus enum -> 'PENDING'/'COMPLETED')
-               status = 'PENDING' if p['status'] == 'PICKUP_PENDING' else 'COMPLETED'
-               
-               # 날짜 필드 처리
-               completed_at = p['pickupCompletedAt'].isoformat() if p['pickupCompletedAt'] else None
-               created_at = p['createdAt'].isoformat() if p['createdAt'] else None
-               
-               item = {
-                   'id': p['id'],
-                   'status': status,
-                   'recipientAddr': p['recipientAddr'],
-                   'productName': p['productName'],
-                   'pickupCompletedAt': completed_at,
-                   'assignedAt': created_at,
-                   'ownerId': p['ownerId'],
-                   'ownerName': p.get('ownerName'),
-                   'size': p['size']
-               }
-               result.append(item)
-           
-           return result
-   except Exception as e:
-       logging.error(f"DB 쿼리 오류: {e}")
-       return []
-   finally:
-       conn.close()
+   """DB에서 직접 기사 할당 소포 목록 가져오기 (오늘 처리할 것만) - 호환성 유지용"""
+   return get_real_pending_pickups(driver_id)
+
+# ✅ 수정된 함수: 현재 기사 위치 정확히 계산
+def get_current_driver_location(driver_id):
+    """현재 기사 위치 정확히 계산"""
+    
+    # 1. 허브 도착 완료 상태면 허브 위치
+    if driver_hub_status.get(driver_id, False):
+        logging.info(f"기사 {driver_id} 허브 도착 완료 상태")
+        return HUB_LOCATION
+    
+    # 2. 오늘 완료된 마지막 수거 위치
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+            SELECT recipientAddr, pickupCompletedAt
+            FROM Parcel
+            WHERE pickupDriverId = %s 
+            AND status = 'PICKUP_COMPLETED'
+            AND DATE(pickupCompletedAt) = CURDATE()
+            AND isDeleted = 0
+            ORDER BY pickupCompletedAt DESC
+            LIMIT 1
+            """
+            cursor.execute(sql, (driver_id,))
+            last_completed = cursor.fetchone()
+            
+            if last_completed:
+                address = last_completed['recipientAddr']
+                lat, lon = address_to_coordinates(address)
+                logging.info(f"기사 {driver_id} 현재 위치: {address} -> ({lat}, {lon})")
+                return {"lat": lat, "lon": lon}
+    
+    except Exception as e:
+        logging.error(f"현재 위치 계산 오류: {e}")
+    finally:
+        conn.close()
+    
+    # 3. 기본값: 허브 (아직 수거 시작 안 함)
+    logging.info(f"기사 {driver_id} 기본 위치: 허브")
+    return HUB_LOCATION
 
 def assign_driver_to_parcel_in_db(parcel_id, driver_id):
    """DB에서 직접 기사 할당 (오늘 처리용)"""
@@ -531,7 +576,89 @@ def extract_waypoints_from_route(route_info):
         logging.error(f"Error extracting waypoints: {e}")
     
     return waypoints, coordinates
-    
+
+# ✅ 수정된 함수: TSP로 최적 다음 목적지 계산
+def calculate_optimal_next_destination(locations, current_location):
+    """TSP로 최적 다음 목적지 계산"""
+    try:
+        # 교통정보 반영된 매트릭스 생성
+        location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
+        time_matrix, _ = get_enhanced_time_distance_matrix(location_coords, costing=COSTING_MODEL)
+        
+        if time_matrix is not None:
+            # LKH로 최적 경로 계산
+            response = requests.post(
+                LKH_SERVICE_URL,
+                json={"matrix": time_matrix.tolist()}
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                optimal_tour = result.get("tour")
+                
+                if optimal_tour and len(optimal_tour) > 1:
+                    # ✅ 다음 목적지 = tour[1] (tour[0]은 현재 위치)
+                    next_idx = optimal_tour[1]
+                    next_location = locations[next_idx]
+                    
+                    # 경로 계산
+                    route_info = get_turn_by_turn_route(
+                        current_location,  # 현재 위치
+                        {"lat": next_location["lat"], "lon": next_location["lon"]},
+                        costing=COSTING_MODEL
+                    )
+                    
+                    # waypoints 및 coordinates 추출
+                    waypoints, coordinates = extract_waypoints_from_route(route_info)
+                    if not waypoints:
+                        # 기본 waypoints
+                        waypoints = [
+                            {
+                                "lat": current_location["lat"],
+                                "lon": current_location["lon"],
+                                "name": "현재위치",
+                                "instruction": "수거 시작"
+                            },
+                            {
+                                "lat": next_location["lat"],
+                                "lon": next_location["lon"],
+                                "name": next_location["name"],
+                                "instruction": "목적지 도착"
+                            }
+                        ]
+                        coordinates = [
+                            {"lat": current_location["lat"], "lon": current_location["lon"]},
+                            {"lat": next_location["lat"], "lon": next_location["lon"]}
+                        ]
+                    
+                    # route에 waypoints와 coordinates 추가
+                    if route_info and 'trip' in route_info:
+                        route_info['waypoints'] = waypoints
+                        route_info['coordinates'] = coordinates
+                    
+                    return next_location, route_info, "LKH_TSP"
+        
+        # Fallback: 가장 가까운 지점
+        next_location = locations[1] if len(locations) > 1 else locations[0]
+        route_info = get_turn_by_turn_route(
+            current_location,
+            {"lat": next_location["lat"], "lon": next_location["lon"]},
+            costing=COSTING_MODEL
+        )
+        
+        # waypoints 추가
+        waypoints, coordinates = extract_waypoints_from_route(route_info)
+        if route_info and 'trip' in route_info:
+            route_info['waypoints'] = waypoints
+            route_info['coordinates'] = coordinates
+        
+        return next_location, route_info, "nearest"
+        
+    except Exception as e:
+        logging.error(f"TSP 계산 오류: {e}")
+        fallback_location = locations[1] if len(locations) > 1 else locations[0]
+        return fallback_location, None, "fallback"
+
 # --- API 엔드포인트 ---
 
 @app.route('/api/pickup/webhook', methods=['POST'])
@@ -628,9 +755,8 @@ def hub_arrived():
         if driver_id not in [1, 2, 3, 4, 5]:
             return jsonify({"error": "수거 기사만 접근 가능합니다"}), 403
         
-        # 현재 할당된 수거가 없는지 확인
-        parcels = get_driver_parcels_from_db(driver_id)
-        pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
+        # ✅ 현재 할당된 수거가 없는지 확인 (실시간 조회)
+        pending_pickups = get_real_pending_pickups(driver_id)
         
         if pending_pickups:
             return jsonify({
@@ -652,6 +778,7 @@ def hub_arrived():
         logging.error(f"Error processing hub arrival: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
+# ✅ 수정된 메인 함수: get_next_destination
 @app.route('/api/pickup/next', methods=['GET'])
 @auth_required
 def get_next_destination():
@@ -680,33 +807,12 @@ def get_next_destination():
                "start_time": "07:00",
                "current_time": current_time.strftime("%H:%M")
            }), 200
-           
-       # DB에서 기사의 소포 목록 가져오기
-       parcels = get_driver_parcels_from_db(driver_id)
-       pending_pickups = [p for p in parcels if p['status'] == 'PENDING']
        
-       # 🔧 현재 위치 계산 (개선된 버전)
-       current_location = HUB_LOCATION  # 기본값
+       # ✅ 실시간으로 미완료 수거만 가져오기
+       pending_pickups = get_real_pending_pickups(driver_id)
        
-       # 1. 먼저 허브 도착 상태 확인
-       if driver_hub_status.get(driver_id, False):
-           current_location = HUB_LOCATION
-           logging.info(f"기사 {driver_id} 허브 도착 완료 상태")
-       else:
-           # 2. 오늘 완료된 수거가 있으면 마지막 완료 위치가 현재 위치
-           today = datetime.now(KST).strftime('%Y-%m-%d')
-           completed_today = [p for p in parcels 
-                            if p['status'] == 'COMPLETED' 
-                            and p.get('pickupCompletedAt', '').startswith(today)]
-           
-           if completed_today:
-               last_completed = sorted(completed_today, 
-                                     key=lambda x: x['pickupCompletedAt'], 
-                                     reverse=True)[0]
-               actual_address = last_completed['recipientAddr']
-               lat, lon = address_to_coordinates(actual_address)
-               current_location = {"lat": lat, "lon": lon}
-               logging.info(f"마지막 수거 완료 위치: {actual_address} -> ({lat}, {lon})")
+       # ✅ 현재 위치 정확히 계산
+       current_location = get_current_driver_location(driver_id)
        
        # 미완료 수거가 없을 때
        if not pending_pickups:
@@ -787,7 +893,9 @@ def get_next_destination():
            driver_hub_status[driver_id] = False
            logging.info(f"기사 {driver_id} 새로운 수거 시작으로 허브 상태 리셋")
        
-       # 🔧 실시간 교통정보가 반영된 TSP 계산
+       # ✅ 실시간 교통정보가 반영된 TSP 계산
+       # locations[0] = 현재 위치 (시작점)
+       # locations[1:] = 미완료 수거 지점들만
        locations = [current_location]
        for pickup in pending_pickups:
            lat, lon = address_to_coordinates(pickup['recipientAddr'])
@@ -799,75 +907,25 @@ def get_next_destination():
                "address": pickup['recipientAddr']
            })
        
-       # 🔧 교통정보가 반영된 매트릭스 계산
+       # ✅ TSP 최적화 - 현재 위치에서 시작하는 최적 경로
        if len(locations) > 1:
-           location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
+           next_location, route_info, algorithm = calculate_optimal_next_destination(locations, current_location)
            
-           # 실시간 교통정보 반영된 매트릭스 생성
-           time_matrix, _ = get_enhanced_time_distance_matrix(location_coords, costing=COSTING_MODEL)
-           
-           if time_matrix is not None:
-               # LKH로 최적 경로 계산
-               response = requests.post(
-                   LKH_SERVICE_URL,
-                   json={"matrix": time_matrix.tolist()}
-               )
-               if response.status_code == 200:
-                   result = response.json()
-                   optimal_tour = result.get("tour")
-                   
-                   if optimal_tour and len(optimal_tour) > 1:
-                       next_idx = optimal_tour[1]
-                       next_location = locations[next_idx]
-                       
-                       route_info = get_turn_by_turn_route(
-                           current_location,
-                           {"lat": next_location["lat"], "lon": next_location["lon"]},
-                           costing=COSTING_MODEL
-                       )
-                       
-                       # 🔧 waypoints 및 coordinates 추출
-                       waypoints, coordinates = extract_waypoints_from_route(route_info)
-                       if not waypoints:
-                           # 기본 waypoints
-                           waypoints = [
-                               {
-                                   "lat": current_location["lat"],
-                                   "lon": current_location["lon"],
-                                   "name": "출발지",
-                                   "instruction": "수거 시작"
-                               },
-                               {
-                                   "lat": next_location["lat"],
-                                   "lon": next_location["lon"],
-                                   "name": next_location["name"],
-                                   "instruction": "목적지 도착"
-                               }
-                           ]
-                           # 기본 coordinates
-                           coordinates = [
-                               {"lat": current_location["lat"], "lon": current_location["lon"]},
-                               {"lat": next_location["lat"], "lon": next_location["lon"]}
-                           ]
-                       
-                       # route에 waypoints와 coordinates 추가
-                       if route_info and 'trip' in route_info:
-                           route_info['waypoints'] = waypoints
-                           route_info['coordinates'] = coordinates
-                       
-                       return jsonify({
-                           "status": "success",
-                           "next_destination": next_location,
-                           "route": route_info,
-                           "is_last": False,
-                           "remaining_pickups": len(pending_pickups),
-                           "traffic_info": {
-                               "time_weight": get_traffic_weight_by_time(),
-                               "current_hour": datetime.now(KST).hour
-                           }
-                       }), 200
+           return jsonify({
+               "status": "success",
+               "next_destination": next_location,
+               "route": route_info,
+               "is_last": False,
+               "remaining_pickups": len(pending_pickups),
+               "current_location": current_location,
+               "algorithm_used": algorithm,
+               "traffic_info": {
+                   "time_weight": get_traffic_weight_by_time(),
+                   "current_hour": datetime.now(KST).hour
+               }
+           }), 200
        
-       # 가장 가까운 수거 지점으로
+       # Fallback: 단일 수거 지점
        next_location = locations[1] if len(locations) > 1 else HUB_LOCATION
        route_info = get_turn_by_turn_route(
            current_location,
@@ -875,29 +933,8 @@ def get_next_destination():
            costing=COSTING_MODEL
        )
        
-       # 🔧 waypoints 및 coordinates 추출 (fallback)
+       # waypoints 추가
        waypoints, coordinates = extract_waypoints_from_route(route_info)
-       if not waypoints:
-           waypoints = [
-               {
-                   "lat": current_location["lat"],
-                   "lon": current_location["lon"],
-                   "name": "출발지",
-                   "instruction": "출발"
-               },
-               {
-                   "lat": next_location["lat"],
-                   "lon": next_location["lon"],  
-                   "name": next_location.get("name", "목적지"),
-                   "instruction": "도착"
-               }
-           ]
-           # 기본 coordinates
-           coordinates = [
-               {"lat": current_location["lat"], "lon": current_location["lon"]},
-               {"lat": next_location["lat"], "lon": next_location["lon"]}
-           ]
-       
        if route_info and 'trip' in route_info:
            route_info['waypoints'] = waypoints
            route_info['coordinates'] = coordinates
@@ -907,13 +944,15 @@ def get_next_destination():
            "next_destination": next_location,
            "route": route_info,
            "is_last": False,
-           "remaining_pickups": len(pending_pickups)
+           "remaining_pickups": len(pending_pickups),
+           "current_location": current_location
        }), 200
            
    except Exception as e:
        logging.error(f"Error getting next destination: {e}", exc_info=True)
        return jsonify({"error": "Internal server error"}), 500
-       
+
+# ✅ 수정된 complete_pickup 함수       
 @app.route('/api/pickup/complete', methods=['POST'])
 @auth_required
 def complete_pickup():
@@ -934,14 +973,24 @@ def complete_pickup():
        if not parcel or parcel.get('pickupDriverId') != driver_id:
            return jsonify({"error": "권한이 없습니다"}), 403
        
-       # DB에서 완료 처리
+       # ✅ DB에서 완료 처리
        if complete_parcel_in_db(parcel_id):
-           return jsonify({"status": "success"}), 200
+           logging.info(f"수거 완료: 기사 {driver_id}, 소포 {parcel_id}")
+           
+           # ✅ 완료 후 남은 미완료 수거 개수 실시간 확인
+           remaining_pickups = get_real_pending_pickups(driver_id)
+           
+           return jsonify({
+               "status": "success",
+               "message": "수거가 완료되었습니다",
+               "remaining_pickups": len(remaining_pickups),
+               "completed_at": datetime.now(KST).isoformat()
+           }), 200
        else:
-           return jsonify({"error": "Failed to complete pickup"}), 500
+           return jsonify({"error": "완료 처리 실패"}), 500
            
    except Exception as e:
-       logging.error(f"Error completing pickup: {e}", exc_info=True)
+       logging.error(f"수거 완료 오류: {e}", exc_info=True)
        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/pickup/all-completed', methods=['GET'])
