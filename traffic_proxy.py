@@ -153,52 +153,58 @@ class TrafficProxy:
         logger.info(f"예상 수집 시간: {elapsed_time:.0f}초 ({elapsed_time/60:.1f}분)")
     
     def modify_route_request(self, request_data):
-        """라우팅 요청 수정 - 교통 데이터 반영"""
-        # 교통 데이터가 있으면 적용
+        """라우팅 요청 수정 - 실제 교통 데이터가 있을 때만"""
+        # 🔧 간단하게: 실제 교통 데이터가 있으면 표시만
         if traffic_data:
-            # 가장 간단한 방법: avoid_polygons 사용하지 않고 단순 시간 조정
             request_data['traffic_applied'] = True
-        
         return request_data
     
     def calculate_real_time(self, route_response):
-        """실제 교통 속도를 반영한 시간 재계산 - 상세 정보 보존"""
+        """🔧 핵심 수정: 실제 매핑된 구간에만 교통 데이터 적용, 나머지는 기본 Valhalla"""
         if 'trip' not in route_response:
             return route_response
         
-        # 🔧 수정: legs와 maneuvers 정보를 보존하면서 시간만 조정
-        if traffic_data and 'legs' in route_response['trip']:
-            avg_speed = sum(traffic_data.values()) / len(traffic_data)
-            
-            if avg_speed < 50:  # 50km/h 이하면 시간 증가
-                factor = 50 / avg_speed
+        # 🔧 실제 교통 데이터가 없으면 기본 Valhalla 결과 그대로 사용
+        if not traffic_data:
+            logging.info("실제 교통 데이터 없음 - 기본 Valhalla 결과 사용")
+            if 'trip' in route_response:
+                route_response['trip']['has_traffic'] = False
+                route_response['trip']['traffic_data_count'] = 0
+            return route_response
+        
+        # 🔧 실제 교통 데이터가 있어도 매우 제한적으로만 적용
+        # 심각한 교통체증이 있는 경우에만 시간 조정
+        if 'legs' in route_response['trip']:
+            speeds = list(traffic_data.values())
+            if speeds:
+                avg_speed = sum(speeds) / len(speeds)
                 
-                # Trip summary 조정
-                if 'summary' in route_response['trip']:
-                    original_time = route_response['trip']['summary'].get('time', 0)
-                    route_response['trip']['summary']['time'] = original_time * factor
-                    route_response['trip']['summary']['traffic_time'] = original_time * factor
-                
-                # 각 leg별로 시간 조정 (상세 정보는 보존)
-                for leg in route_response['trip']['legs']:
-                    if 'summary' in leg:
-                        leg_time = leg['summary'].get('time', 0)
-                        leg['summary']['time'] = leg_time * factor
+                # 🔧 심각한 교통체증 (평균 20km/h 이하)일 때만 적용
+                if avg_speed < 20:
+                    factor = 1.5  # 고정 1.5배로 간단하게
                     
-                    # 각 maneuver별로 시간 조정 (instruction은 보존)
-                    for maneuver in leg.get('maneuvers', []):
-                        maneuver_time = maneuver.get('time', 0)
-                        maneuver['time'] = maneuver_time * factor
-        else:
-            # 기존 로직 (legs가 없는 경우)
-            if traffic_data:
-                avg_speed = sum(traffic_data.values()) / len(traffic_data)
-                if avg_speed < 50:  # 50km/h 이하면 시간 증가
-                    factor = 50 / avg_speed
                     if 'summary' in route_response['trip']:
                         original_time = route_response['trip']['summary'].get('time', 0)
                         route_response['trip']['summary']['time'] = original_time * factor
                         route_response['trip']['summary']['traffic_time'] = original_time * factor
+                    
+                    for leg in route_response['trip']['legs']:
+                        if 'summary' in leg:
+                            leg_time = leg['summary'].get('time', 0)
+                            leg['summary']['time'] = leg_time * factor
+                        
+                        for maneuver in leg.get('maneuvers', []):
+                            maneuver_time = maneuver.get('time', 0)
+                            maneuver['time'] = maneuver_time * factor
+                    
+                    logger.info(f"심각한 교통체증 감지 (평균 {avg_speed:.1f}km/h) - 시간 1.5배 적용")
+                else:
+                    logger.info(f"교통 상황 양호 (평균 {avg_speed:.1f}km/h) - 기본 Valhalla 시간 사용")
+        
+        # 메타데이터만 추가
+        if 'trip' in route_response:
+            route_response['trip']['has_traffic'] = True
+            route_response['trip']['traffic_data_count'] = len(traffic_data)
         
         return route_response
     
