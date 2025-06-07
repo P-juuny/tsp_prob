@@ -558,7 +558,7 @@ def get_next_delivery():
     try:
         # 현재 로그인한 기사 정보
         driver_info = get_current_driver()
-        driver_id = driver_info['id']
+        driver_id = driver_info['user_id']
         
         # 시간 체크 추가
         current_time = datetime.now(KST).time()
