@@ -51,18 +51,31 @@ def solve_tsp():
             else:  # n == 2
                 return jsonify({"tour": [0, 1], "tour_length": float(distance_matrix[0][1])})
         
-        # LKH 파라미터 추출
-        max_trials = data.get('max_trials', 1000)
-        time_limit = data.get('time_limit', 300)
+        # 🔧 노드 수에 따른 동적 runs 설정
+        if n <= 5:
+            default_runs = 3
+        elif n <= 10:
+            default_runs = 5
+        elif n <= 20:
+            default_runs = 8
+        elif n <= 50:
+            default_runs = 12
+        else:
+            default_runs = 15
+        
+        # 사용자가 지정한 파라미터가 있으면 사용, 없으면 동적 설정값 사용
+        runs = data.get('runs', default_runs)
+        max_trials = data.get('max_trials', None)  # run_lkh_internal에서 동적 설정
+        time_limit = data.get('time_limit', None)  # run_lkh_internal에서 동적 설정
         seed = data.get('seed', 1)
         
         # TSP 풀기
-        logging.info(f"TSP 해결 중 (노드 수: {n}, max_trials: {max_trials}, time_limit: {time_limit})")
+        logging.info(f"TSP 해결 중 (노드 수: {n}, runs: {runs})")
         
         try:
             tour, tour_length = solve_tsp_with_lkh(
                 distance_matrix, 
-                runs=5  # 더 빠른 실행을 위해 runs 줄임
+                runs=runs
             )
             
             if tour is None:
@@ -73,7 +86,9 @@ def solve_tsp():
             
             return jsonify({
                 "tour": tour,
-                "tour_length": float(tour_length)
+                "tour_length": float(tour_length),
+                "nodes": n,
+                "runs_used": runs
             })
             
         except Exception as e:
@@ -85,5 +100,5 @@ def solve_tsp():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    logging.info("LKH TSP 서비스 시작...")
+    logging.info("최적화된 LKH TSP 서비스 시작...")
     app.run(host='0.0.0.0', port=5001)

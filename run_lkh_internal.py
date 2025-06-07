@@ -26,6 +26,33 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
     if n == 1:
         return [0], 0.0
 
+    # 🔧 노드 수에 따른 동적 파라미터 설정
+    if n <= 5:
+        # 매우 작은 경우: 빠른 실행
+        runs = max(3, runs)
+        time_limit = 15
+        max_trials = 1000
+    elif n <= 10:
+        # 작은 경우
+        runs = max(5, runs)
+        time_limit = 30
+        max_trials = 3000
+    elif n <= 20:
+        # 중간 경우
+        runs = max(8, runs)
+        time_limit = 60
+        max_trials = 8000
+    elif n <= 50:
+        # 큰 경우
+        runs = max(12, runs)
+        time_limit = 120
+        max_trials = 15000
+    else:
+        # 매우 큰 경우
+        runs = max(15, runs)
+        time_limit = 300
+        max_trials = 25000
+
     # LKH는 정수 가중치를 선호하므로, 초 단위 시간을 정수로 변환
     # 소수점 이하는 버리거나 반올림할 수 있음 (여기서는 반올림)
     int_time_matrix = np.round(time_matrix).astype(int)
@@ -63,27 +90,51 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
                 f.write("-1\n")
                 f.write("EOF\n")
 
-        # 3. Parameter file (.par) 생성
+        # 3. 🔧 최적화된 Parameter file (.par) 생성
         with open(param_filename, 'w') as f:
             f.write(f"PROBLEM_FILE = {problem_filename}\n")
             f.write(f"OUTPUT_TOUR_FILE = {output_filename}\n")
-            f.write(f"RUNS = {runs}\n") # 실행 횟수
-            f.write(f"TRACE_LEVEL = 1\n") # 로그 레벨 (0: 없음, 1: 기본)
-            f.write(f"TIME_LIMIT = 30\n") # 최대 실행 시간 제한 (초) - 노드 수에 따라 조절
+            f.write(f"RUNS = {runs}\n")
+            f.write(f"TRACE_LEVEL = 1\n")
+            f.write(f"TIME_LIMIT = {time_limit}\n")
+            f.write(f"MAX_TRIALS = {max_trials}\n")
+            
+            # 🔧 성능 최적화 파라미터
+            if n <= 10:
+                # 작은 인스턴스: 기본 설정
+                f.write("INITIAL_PERIOD = 100\n")
+                f.write("MAX_CANDIDATES = 5\n")
+            elif n <= 30:
+                # 중간 인스턴스: POPMUSIC 사용
+                f.write("CANDIDATE_SET_TYPE = POPMUSIC\n")
+                f.write("POPMUSIC_SAMPLE_SIZE = 10\n")
+                f.write("POPMUSIC_SOLUTIONS = 50\n")
+                f.write("POPMUSIC_MAX_NEIGHBORS = 5\n")
+                f.write("POPMUSIC_TRIALS = 1\n")
+                f.write("INITIAL_PERIOD = 50\n")
+            else:
+                # 큰 인스턴스: 고급 최적화
+                f.write("CANDIDATE_SET_TYPE = POPMUSIC\n")
+                f.write("POPMUSIC_SAMPLE_SIZE = 15\n")
+                f.write("POPMUSIC_SOLUTIONS = 100\n")
+                f.write("POPMUSIC_MAX_NEIGHBORS = 8\n")
+                f.write("POPMUSIC_TRIALS = 2\n")
+                f.write("INITIAL_PERIOD = 30\n")
+                f.write("SUBGRADIENT = YES\n")
+                f.write("ASCENT_CANDIDATES = 50\n")
+                f.write("EXCESS = 1.0/DIM\n")
+            
             if initial_tour_filename and initial_tour:
-                 f.write(f"INITIAL_TOUR_FILE = {initial_tour_filename}\n")
-            # 필요시 다른 LKH 파라미터 추가 (e.g., MAX_TRIALS, SEED 등)
-            # f.write("MAX_TRIALS = 10000\n")
+                f.write(f"INITIAL_TOUR_FILE = {initial_tour_filename}\n")
 
         # 4. LKH 실행
         try:
             # print(f"Running LKH with command: {LKH_EXECUTABLE} {param_filename}")
-            process = subprocess.run([LKH_EXECUTABLE, param_filename], capture_output=True, text=True, check=True, timeout=45) # LKH 실행 타임아웃 추가
+            process = subprocess.run([LKH_EXECUTABLE, param_filename], capture_output=True, text=True, check=True, timeout=time_limit + 60) # LKH 실행 타임아웃 추가
             # print("LKH stdout:")
             # print(process.stdout)
             # print("LKH stderr:")
             # print(process.stderr)
-
 
         except FileNotFoundError:
             print(f"Error: LKH executable not found at {LKH_EXECUTABLE}")
@@ -98,7 +149,6 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
              print(f"LKH stdout so far:\n{e.stdout}")
              print(f"LKH stderr so far:\n{e.stderr}")
              return None, None
-
 
         # 5. Output tour file (.tour) 파싱
         try:
@@ -118,7 +168,6 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
             else:
                  print("Warning: Could not find cost information in LKH standard output.")
                  # 비용을 직접 계산해야 할 수도 있음 (파싱된 경로 기준)
-
 
             # 경로 파싱
             tour_section_start = -1
@@ -143,7 +192,6 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
                     print(f"Warning: Skipping invalid node index in tour file: {node_str}")
                     continue
 
-
             if not optimal_tour:
                  print(f"Error: No valid tour found in {output_filename}")
                  return None, None
@@ -164,7 +212,6 @@ def solve_tsp_with_lkh(time_matrix, initial_tour=None, runs=5):
                     calculated_cost += time_matrix[from_node, to_node]
                 optimal_cost = calculated_cost
                 print(f"Recalculated cost: {optimal_cost}")
-
 
             return optimal_tour, optimal_cost
 
