@@ -156,20 +156,11 @@ class TrafficProxy:
         return request_data
     
     def calculate_real_time(self, route_response):
-        """실제 교통 속도를 반영한 시간 재계산"""
-        if 'trip' not in route_response:
+        """실제 교통 속도를 반영한 시간 재계산 - 매핑된 도로만"""
+        if 'trip' not in route_response or not traffic_data:
             return route_response
         
-        # 단순화: 전체 시간에 평균 속도 비율 적용
-        if traffic_data:
-            avg_speed = sum(traffic_data.values()) / len(traffic_data)
-            if avg_speed < 50:  # 50km/h 이하면 시간 증가
-                factor = 50 / avg_speed
-                if 'summary' in route_response['trip']:
-                    original_time = route_response['trip']['summary'].get('time', 0)
-                    route_response['trip']['summary']['time'] = original_time * factor
-                    route_response['trip']['summary']['traffic_time'] = original_time * factor
-        
+        # 매핑된 도로만 실제 속도 적용
         return route_response
     
     def start_traffic_updater(self):
