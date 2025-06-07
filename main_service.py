@@ -64,94 +64,6 @@ DISTRICT_DRIVER_MAPPING = {
 # Flask 앱 설정
 app = Flask(__name__)
 
-# 🔧 실시간 교통정보 반영을 위한 함수들
-def get_traffic_weight_by_time():
-    """현재 시간대에 따른 교통 가중치 반환"""
-    current_time = datetime.now(KST).time()
-    current_hour = current_time.hour
-    
-    # 시간대별 교통량 패턴 반영
-    if 7 <= current_hour <= 9:  # 출근 러시아워
-        return 1.6
-    elif 12 <= current_hour <= 13:  # 점심시간
-        return 1.3
-    elif 18 <= current_hour <= 20:  # 퇴근 러시아워
-        return 1.7
-    elif 21 <= current_hour <= 23:  # 저녁 시간
-        return 1.2
-    elif 0 <= current_hour <= 6:  # 새벽 시간
-        return 0.7
-    else:  # 평상시
-        return 1.0
-
-def get_district_traffic_weight(address):
-    """구별 교통 복잡도에 따른 가중치 반환"""
-    # 교통 복잡 지역
-    complex_districts = ["강남구", "서초구", "종로구", "중구", "마포구", "영등포구"]
-    # 중간 복잡 지역
-    medium_districts = ["송파구", "강동구", "성동구", "광진구", "용산구", "서대문구"]
-    # 상대적으로 한산한 지역
-    
-    for district in complex_districts:
-        if district in address:
-            return 1.4
-    
-    for district in medium_districts:
-        if district in address:
-            return 1.2
-    
-    return 1.0  # 기본값
-
-def apply_traffic_weights_to_matrix(time_matrix, locations):
-    """매트릭스에 실시간 교통 가중치 적용"""
-    if time_matrix is None or len(locations) == 0:
-        return time_matrix
-    
-    # 시간대별 기본 가중치
-    time_weight = get_traffic_weight_by_time()
-    
-    # 각 구간별로 가중치 적용
-    weighted_matrix = time_matrix.copy()
-    
-    for i in range(len(locations)):
-        for j in range(len(locations)):
-            if i != j:
-                # 출발지와 도착지의 구별 가중치 평균
-                start_weight = get_district_traffic_weight(locations[i].get('address', ''))
-                end_weight = get_district_traffic_weight(locations[j].get('address', ''))
-                district_weight = (start_weight + end_weight) / 2
-                
-                # 최종 가중치 = 시간대 가중치 × 구별 가중치
-                final_weight = time_weight * district_weight
-                
-                # 매트릭스에 가중치 적용
-                weighted_matrix[i][j] *= final_weight
-    
-    logging.info(f"교통 가중치 적용 완료 - 시간대: {time_weight:.2f}, 현재시간: {datetime.now(KST).strftime('%H:%M')}")
-    return weighted_matrix
-
-def get_enhanced_time_distance_matrix(locations, costing="auto"):
-    """교통정보가 반영된 매트릭스 생성"""
-    # 기본 매트릭스 계산 (traffic-proxy를 통해 어느 정도 실시간 정보 반영됨)
-    time_matrix, distance_matrix = get_time_distance_matrix(locations, costing=costing, use_traffic=True)
-    
-    if time_matrix is not None:
-        # 🔧 추가 교통 가중치 적용
-        enhanced_locations = []
-        for i, loc in enumerate(locations):
-            enhanced_loc = {
-                'lat': loc['lat'],
-                'lon': loc['lon'],
-                'address': loc.get('address', ''),
-                'name': loc.get('name', f'위치{i+1}')
-            }
-            enhanced_locations.append(enhanced_loc)
-        
-        # 실시간 교통 패턴 반영
-        time_matrix = apply_traffic_weights_to_matrix(time_matrix, enhanced_locations)
-    
-    return time_matrix, distance_matrix
-
 # --- DB 접근 함수들 ---
 def get_db_connection():
    """DB 연결 생성"""
@@ -439,7 +351,7 @@ def get_completed_pickups_today_from_db():
    finally:
        conn.close()
 
-# --- 주소 처리 함수들 (수정됨) ---
+# --- 주소 처리 함수들 ---
 def address_to_coordinates(address):
    """주소를 위도/경도로 변환 (개선된 버전)"""
    try:
@@ -515,7 +427,7 @@ def get_default_coordinates(address):
    
    return (37.5665, 126.9780)
 
-# 🔧 수정된 waypoints 추출 함수
+# 🔧 waypoints 추출 함수
 def extract_waypoints_from_route(route_info):
     """Valhalla route 응답에서 waypoints와 coordinates 추출"""
     waypoints = []
@@ -544,17 +456,16 @@ def extract_waypoints_from_route(route_info):
                 logging.error(f"Shape decoding error: {e}")
                 coordinates = []
         
-        # 🔧 핵심 수정: maneuvers에서 waypoints 추출할 때 좌표 처리
+        # maneuvers에서 waypoints 추출할 때 좌표 처리
         for i, maneuver in enumerate(maneuvers):
             instruction = maneuver.get('instruction', f'구간 {i+1}')
             street_names = maneuver.get('street_names', [])
             street_name = street_names[0] if street_names else f'구간{i+1}'
             
-            # 🔧 중요: begin_shape_index를 사용해서 실제 좌표 가져오기
+            # begin_shape_index를 사용해서 실제 좌표 가져오기
             begin_idx = maneuver.get('begin_shape_index', 0)
             
             if coordinates and begin_idx < len(coordinates):
-                # 🔧 여기가 문제였음: 딕셔너리에서 값을 제대로 가져와야 함
                 lat = coordinates[begin_idx]["lat"]
                 lon = coordinates[begin_idx]["lon"]
             else:
@@ -580,9 +491,9 @@ def extract_waypoints_from_route(route_info):
 def calculate_optimal_next_destination(locations, current_location):
    """TSP로 최적 다음 목적지 계산"""
    try:
-       # 교통정보 반영된 매트릭스 생성
+       # 실시간 교통정보를 포함한 매트릭스 생성
        location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
-       time_matrix, _ = get_enhanced_time_distance_matrix(location_coords, costing=COSTING_MODEL)
+       time_matrix, _ = get_time_distance_matrix(location_coords, costing=COSTING_MODEL, use_traffic=True)
        
        if time_matrix is not None:
            # LKH로 최적 경로 계산
@@ -773,7 +684,7 @@ def hub_arrived():
                 "remaining_pickups": len(pending_pickups)
             }), 400
         
-        # 🔧 메모리에 허브 도착 상태 저장
+        # 메모리에 허브 도착 상태 저장
         driver_hub_status[driver_id] = True
         
         return jsonify({
@@ -827,7 +738,7 @@ def get_next_destination():
        if not pending_pickups:
            current_time = datetime.now(KST).time()
            
-           # 🔧 이미 허브에 있다면
+           # 이미 허브에 있다면
            if driver_hub_status.get(driver_id, False):
                return jsonify({
                    "status": "at_hub",
@@ -837,7 +748,7 @@ def get_next_destination():
                    "is_last": True
                }), 200
            
-           # 🔧 12시 이전이면 "대기" 상태
+           # 12시 이전이면 "대기" 상태
            if current_time < PICKUP_CUTOFF_TIME:  # 정오 12시 이전
                return jsonify({
                    "status": "waiting_for_orders",
@@ -849,7 +760,7 @@ def get_next_destination():
                    "remaining_pickups": 0
                }), 200
            
-           # 🔧 12시 이후면 허브 복귀
+           # 12시 이후면 허브 복귀
            else:
                route_info = get_turn_by_turn_route(
                    current_location,
@@ -857,7 +768,7 @@ def get_next_destination():
                    costing=COSTING_MODEL
                )
                
-               # 🔧 waypoints 및 coordinates 추출
+               # waypoints 및 coordinates 추출
                waypoints, coordinates = extract_waypoints_from_route(route_info)
                if not waypoints:
                    # 기본 waypoints (출발지 -> 목적지)
@@ -881,7 +792,7 @@ def get_next_destination():
                        {"lat": HUB_LOCATION["lat"], "lon": HUB_LOCATION["lon"]}
                    ]
                
-               # 🔧 route에 waypoints와 coordinates 추가
+               # route에 waypoints와 coordinates 추가
                if route_info and 'trip' in route_info:
                    route_info['waypoints'] = waypoints
                    route_info['coordinates'] = coordinates
@@ -897,7 +808,7 @@ def get_next_destination():
                    "distance_to_hub": route_info['trip']['summary']['length'] if route_info else 0
                }), 200
        
-       # 🔧 새로운 수거가 시작되면 허브 상태 리셋
+       # 새로운 수거가 시작되면 허브 상태 리셋
        if pending_pickups and driver_hub_status.get(driver_id, False):
            driver_hub_status[driver_id] = False
            logging.info(f"기사 {driver_id} 새로운 수거 시작으로 허브 상태 리셋")
@@ -927,11 +838,7 @@ def get_next_destination():
                "is_last": False,
                "remaining_pickups": len(pending_pickups),
                "current_location": current_location,
-               "algorithm_used": algorithm,
-               "traffic_info": {
-                   "time_weight": get_traffic_weight_by_time(),
-                   "current_hour": datetime.now(KST).hour
-               }
+               "algorithm_used": algorithm
            }), 200
        
        # Fallback: 단일 수거 지점
@@ -1042,7 +949,7 @@ def check_all_completed():
                 cursor.execute(sql_completed)
                 completed_result = cursor.fetchone()
                 
-                # 🔧 수정: 모든 결과를 먼저 집계
+                # 수정: 모든 결과를 먼저 집계
                 if pending_results:
                     for result in pending_results:
                         driver_id = result['pickupDriverId']
@@ -1060,7 +967,7 @@ def check_all_completed():
         finally:
             conn.close()
         
-        # 🔧 수정: 미완료가 있으면 집계 완료 후 응답
+        # 수정: 미완료가 있으면 집계 완료 후 응답
         if total_pending > 0:
             return jsonify({
                 "completed": False, 

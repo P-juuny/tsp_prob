@@ -63,91 +63,10 @@ DISTRICT_DRIVER_MAPPING = {
 # Flask 앱 설정
 app = Flask(__name__)
 
-# 🔧 실시간 교통정보 반영을 위한 함수들 (수거와 동일)
-def get_traffic_weight_by_time():
-    """현재 시간대에 따른 교통 가중치 반환"""
-    current_time = datetime.now(KST).time()
-    current_hour = current_time.hour
-    
-    # 시간대별 교통량 패턴 반영
-    if 7 <= current_hour <= 9:  # 출근 러시아워
-        return 1.6
-    elif 12 <= current_hour <= 13:  # 점심시간
-        return 1.3
-    elif 18 <= current_hour <= 20:  # 퇴근 러시아워
-        return 1.7
-    elif 21 <= current_hour <= 23:  # 저녁 시간
-        return 1.2
-    elif 0 <= current_hour <= 6:  # 새벽 시간
-        return 0.7
-    else:  # 평상시
-        return 1.0
-
-def get_district_traffic_weight(address):
-    """구별 교통 복잡도에 따른 가중치 반환"""
-    # 교통 복잡 지역
-    complex_districts = ["강남구", "서초구", "종로구", "중구", "마포구", "영등포구"]
-    # 중간 복잡 지역
-    medium_districts = ["송파구", "강동구", "성동구", "광진구", "용산구", "서대문구"]
-    
-    for district in complex_districts:
-        if district in address:
-            return 1.4
-    
-    for district in medium_districts:
-        if district in address:
-            return 1.2
-    
-    return 1.0  # 기본값
-
-def apply_traffic_weights_to_matrix(time_matrix, locations):
-    """매트릭스에 실시간 교통 가중치 적용"""
-    if time_matrix is None or len(locations) == 0:
-        return time_matrix
-    
-    # 시간대별 기본 가중치
-    time_weight = get_traffic_weight_by_time()
-    
-    # 각 구간별로 가중치 적용
-    weighted_matrix = time_matrix.copy()
-    
-    for i in range(len(locations)):
-        for j in range(len(locations)):
-            if i != j:
-                # 출발지와 도착지의 구별 가중치 평균
-                start_weight = get_district_traffic_weight(locations[i].get('address', ''))
-                end_weight = get_district_traffic_weight(locations[j].get('address', ''))
-                district_weight = (start_weight + end_weight) / 2
-                
-                # 최종 가중치 = 시간대 가중치 × 구별 가중치
-                final_weight = time_weight * district_weight
-                
-                # 매트릭스에 가중치 적용
-                weighted_matrix[i][j] *= final_weight
-    
-    logging.info(f"교통 가중치 적용 완료 - 시간대: {time_weight:.2f}, 현재시간: {datetime.now(KST).strftime('%H:%M')}")
-    return weighted_matrix
-
 def get_enhanced_time_distance_matrix(locations, costing="auto"):
-    """교통정보가 반영된 매트릭스 생성"""
-    # 기본 매트릭스 계산 (traffic-proxy를 통해 어느 정도 실시간 정보 반영됨)
+    """단순한 매트릭스 생성 (교통 가중치 제거)"""
+    # 기본 매트릭스 계산만 수행
     time_matrix, distance_matrix = get_time_distance_matrix(locations, costing=costing, use_traffic=True)
-    
-    if time_matrix is not None:
-        # 🔧 추가 교통 가중치 적용
-        enhanced_locations = []
-        for i, loc in enumerate(locations):
-            enhanced_loc = {
-                'lat': loc['lat'],
-                'lon': loc['lon'],
-                'address': loc.get('address', ''),
-                'name': loc.get('name', f'위치{i+1}')
-            }
-            enhanced_locations.append(enhanced_loc)
-        
-        # 실시간 교통 패턴 반영
-        time_matrix = apply_traffic_weights_to_matrix(time_matrix, enhanced_locations)
-    
     return time_matrix, distance_matrix
 
 # --- DB 접근 함수들 ---
@@ -595,7 +514,7 @@ def extract_waypoints_from_route(route_info):
 def calculate_optimal_next_destination(locations, current_location):
    """TSP로 최적 다음 목적지 계산"""
    try:
-       # 교통정보 반영된 매트릭스 생성
+       # 기본 매트릭스 생성 (교통 가중치 제거됨)
        location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
        time_matrix, _ = get_enhanced_time_distance_matrix(location_coords, costing=COSTING_MODEL)
        
@@ -881,7 +800,7 @@ def get_next_delivery():
             driver_hub_status[driver_id] = False
             logging.info(f"배달 기사 {driver_id} 새로운 배달 시작으로 허브 상태 리셋")
         
-        # ✅ 실시간 교통정보가 반영된 TSP 계산
+        # ✅ TSP 계산 (교통 가중치 제거됨)
         # locations[0] = 현재 위치 (시작점)
         # locations[1:] = 미완료 배달 지점들만
         locations = [current_location]
@@ -924,11 +843,7 @@ def get_next_delivery():
                 "remaining": len(pending_deliveries),
                 "current_location": current_location,
                 "algorithm_used": algorithm,
-                "geocoding_method": "kakao",
-                "traffic_info": {
-                    "time_weight": get_traffic_weight_by_time(),
-                    "current_hour": datetime.now(KST).hour
-                }
+                "geocoding_method": "kakao"
             }), 200
         
         # Fallback: 단일 배달 지점
@@ -1005,6 +920,42 @@ def complete_delivery():
             
     except Exception as e:
         logging.error(f"배달 완료 오류: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/delivery/hub-arrived', methods=['POST'])
+@auth_required
+def hub_arrived():
+    """허브 도착 완료 처리 (배달 기사용)"""
+    try:
+        # 현재 로그인한 기사 확인
+        driver_info = get_current_driver()
+        driver_id = driver_info['user_id']  # user_id 사용
+        
+        # driver_id는 6-10 중 하나여야 함 (배달 기사)
+        if driver_id not in [6, 7, 8, 9, 10]:
+            return jsonify({"error": "배달 기사만 접근 가능합니다"}), 403
+        
+        # 현재 할당된 배달이 없는지 확인
+        pending_deliveries = get_real_pending_deliveries(driver_id)
+        
+        if pending_deliveries:
+            return jsonify({
+                "error": "아직 완료하지 않은 배달이 있습니다",
+                "remaining_deliveries": len(pending_deliveries)
+            }), 400
+        
+        # 🔧 메모리에 허브 도착 상태 저장
+        driver_hub_status[driver_id] = True
+        
+        return jsonify({
+            "status": "success",
+            "message": "허브 도착이 완료되었습니다. 수고하셨습니다!",
+            "location": HUB_LOCATION,
+            "arrival_time": datetime.now(KST).strftime("%H:%M")
+        }), 200
+            
+    except Exception as e:
+        logging.error(f"Error processing hub arrival: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/delivery/status')  
