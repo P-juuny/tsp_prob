@@ -577,88 +577,97 @@ def extract_waypoints_from_route(route_info):
     
     return waypoints, coordinates
 
-# ✅ 수정된 함수: TSP로 최적 다음 목적지 계산
 def calculate_optimal_next_destination(locations, current_location):
-    """TSP로 최적 다음 목적지 계산"""
-    try:
-        # 교통정보 반영된 매트릭스 생성
-        location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
-        time_matrix, _ = get_enhanced_time_distance_matrix(location_coords, costing=COSTING_MODEL)
-        
-        if time_matrix is not None:
-            # LKH로 최적 경로 계산
-            response = requests.post(
-                LKH_SERVICE_URL,
-                json={"matrix": time_matrix.tolist()}
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                optimal_tour = result.get("tour")
-                
-                if optimal_tour and len(optimal_tour) > 1:
-                    # ✅ 다음 목적지 = tour[1] (tour[0]은 현재 위치)
-                    next_idx = optimal_tour[1]
-                    next_location = locations[next_idx]
-                    
-                    # 경로 계산
-                    route_info = get_turn_by_turn_route(
-                        current_location,  # 현재 위치
-                        {"lat": next_location["lat"], "lon": next_location["lon"]},
-                        costing=COSTING_MODEL
-                    )
-                    
-                    # waypoints 및 coordinates 추출
-                    waypoints, coordinates = extract_waypoints_from_route(route_info)
-                    if not waypoints:
-                        # 기본 waypoints
-                        waypoints = [
-                            {
-                                "lat": current_location["lat"],
-                                "lon": current_location["lon"],
-                                "name": "현재위치",
-                                "instruction": "수거 시작"
-                            },
-                            {
-                                "lat": next_location["lat"],
-                                "lon": next_location["lon"],
-                                "name": next_location["name"],
-                                "instruction": "목적지 도착"
-                            }
-                        ]
-                        coordinates = [
-                            {"lat": current_location["lat"], "lon": current_location["lon"]},
-                            {"lat": next_location["lat"], "lon": next_location["lon"]}
-                        ]
-                    
-                    # route에 waypoints와 coordinates 추가
-                    if route_info and 'trip' in route_info:
-                        route_info['waypoints'] = waypoints
-                        route_info['coordinates'] = coordinates
-                    
-                    return next_location, route_info, "LKH_TSP"
-        
-        # Fallback: 가장 가까운 지점
-        next_location = locations[1] if len(locations) > 1 else locations[0]
-        route_info = get_turn_by_turn_route(
-            current_location,
-            {"lat": next_location["lat"], "lon": next_location["lon"]},
-            costing=COSTING_MODEL
-        )
-        
-        # waypoints 추가
-        waypoints, coordinates = extract_waypoints_from_route(route_info)
-        if route_info and 'trip' in route_info:
-            route_info['waypoints'] = waypoints
-            route_info['coordinates'] = coordinates
-        
-        return next_location, route_info, "nearest"
-        
-    except Exception as e:
-        logging.error(f"TSP 계산 오류: {e}")
-        fallback_location = locations[1] if len(locations) > 1 else locations[0]
-        return fallback_location, None, "fallback"
-
+   """TSP로 최적 다음 목적지 계산"""
+   try:
+       # 교통정보 반영된 매트릭스 생성
+       location_coords = [{"lat": loc["lat"], "lon": loc["lon"]} for loc in locations]
+       time_matrix, _ = get_enhanced_time_distance_matrix(location_coords, costing=COSTING_MODEL)
+       
+       if time_matrix is not None:
+           # LKH로 최적 경로 계산
+           response = requests.post(
+               LKH_SERVICE_URL,
+               json={"matrix": time_matrix.tolist()}
+           )
+           
+           if response.status_code == 200:
+               result = response.json()
+               optimal_tour = result.get("tour")
+               
+               if optimal_tour and len(optimal_tour) > 1:
+                   # ✅ 수정: 현재 위치(0번 인덱스) 제외하고 다음 목적지 선택
+                   next_idx = None
+                   for idx in optimal_tour[1:]:  # 첫 번째(현재위치) 제외
+                       if idx != 0:  # 현재위치가 아닌 것만
+                           next_idx = idx
+                           break
+                   
+                   # 현재위치가 아닌 목적지를 찾지 못한 경우 fallback
+                   if next_idx is None and len(locations) > 1:
+                       next_idx = 1  # 첫 번째 수거 지점
+                   
+                   if next_idx is not None:
+                       next_location = locations[next_idx]
+                       
+                       # 경로 계산
+                       route_info = get_turn_by_turn_route(
+                           current_location,  # 현재 위치
+                           {"lat": next_location["lat"], "lon": next_location["lon"]},
+                           costing=COSTING_MODEL
+                       )
+                       
+                       # waypoints 및 coordinates 추출
+                       waypoints, coordinates = extract_waypoints_from_route(route_info)
+                       if not waypoints:
+                           # 기본 waypoints
+                           waypoints = [
+                               {
+                                   "lat": current_location["lat"],
+                                   "lon": current_location["lon"],
+                                   "name": "현재위치",
+                                   "instruction": "수거 시작"
+                               },
+                               {
+                                   "lat": next_location["lat"],
+                                   "lon": next_location["lon"],
+                                   "name": next_location["name"],
+                                   "instruction": "목적지 도착"
+                               }
+                           ]
+                           coordinates = [
+                               {"lat": current_location["lat"], "lon": current_location["lon"]},
+                               {"lat": next_location["lat"], "lon": next_location["lon"]}
+                           ]
+                       
+                       # route에 waypoints와 coordinates 추가
+                       if route_info and 'trip' in route_info:
+                           route_info['waypoints'] = waypoints
+                           route_info['coordinates'] = coordinates
+                       
+                       return next_location, route_info, "LKH_TSP"
+       
+       # Fallback: 가장 가까운 지점
+       next_location = locations[1] if len(locations) > 1 else locations[0]
+       route_info = get_turn_by_turn_route(
+           current_location,
+           {"lat": next_location["lat"], "lon": next_location["lon"]},
+           costing=COSTING_MODEL
+       )
+       
+       # waypoints 추가
+       waypoints, coordinates = extract_waypoints_from_route(route_info)
+       if route_info and 'trip' in route_info:
+           route_info['waypoints'] = waypoints
+           route_info['coordinates'] = coordinates
+       
+       return next_location, route_info, "nearest"
+       
+   except Exception as e:
+       logging.error(f"TSP 계산 오류: {e}")
+       fallback_location = locations[1] if len(locations) > 1 else locations[0]
+       return fallback_location, None, "fallback"
+       
 # --- API 엔드포인트 ---
 
 @app.route('/api/pickup/webhook', methods=['POST'])
