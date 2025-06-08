@@ -138,30 +138,105 @@ class TrafficProxy:
            logger.info(f"교통 속도 분포: 평균 {avg_speed:.1f}km/h, 최소 {min_speed:.1f}km/h, 최대 {max_speed:.1f}km/h")
    
    def find_real_speed_for_segment(self, maneuver):
+       """현실적인 실시간 교통 적용 - 5000개 데이터 활용"""
+       
        if not traffic_data:
            return None
-
-       street_names = maneuver.get('street_names', [])
-
-       for street_name in street_names:
-           if not street_name:
-               continue
-
-           street_name_lower = str(street_name).lower()
-           
-           if '강남대로' in street_name or 'gangnam' in street_name_lower:
-               for osm_id, speed in traffic_data.items():
-                   if speed > 0:
-                       return speed
-
-       if traffic_data:
-           speeds = [s for s in traffic_data.values() if 5 <= s <= 100]
-           if speeds:
-               avg_speed = sum(speeds) / len(speeds)
-               if avg_speed < 40:
-                   return avg_speed
        
-       return None
+       street_names = maneuver.get('street_names', [])
+       segment_length = maneuver.get('length', 0)
+
+       current_speeds = [s for s in traffic_data.values() if 10 <= s <= 80]
+       if not current_speeds:
+           return None
+
+       avg_speed = sum(current_speeds) / len(current_speeds)
+       slow_count = len([s for s in current_speeds if s < 25])
+       fast_count = len([s for s in current_speeds if s > 50])
+       total_count = len(current_speeds)
+       
+       congestion_ratio = slow_count / total_count
+       smooth_ratio = fast_count / total_count
+
+       if congestion_ratio > 0.5:
+           traffic_condition = '혼잡'
+           condition_factor = 0.7
+       elif congestion_ratio > 0.3:
+           traffic_condition = '보통'
+           condition_factor = 0.85
+       else:
+           traffic_condition = '원활'
+           condition_factor = 1.1
+
+       street_text = ' '.join(street_names).lower()
+
+       
+       if segment_length >= 1.5:
+           road_class = 'highway'
+           base_speed = 50
+       elif segment_length >= 0.5:
+           road_class = 'major'
+           base_speed = 35
+       else:
+           road_class = 'local'
+           base_speed = 25
+
+       if any(keyword in street_text for keyword in ['고속도로', '순환로', '대로']):
+           if road_class == 'local':
+               road_class = 'major'
+           base_speed = max(base_speed, 40)
+       elif any(keyword in street_text for keyword in ['로']):
+           base_speed = max(base_speed, 30)
+       elif any(keyword in street_text for keyword in ['길', '동']):
+           base_speed = min(base_speed, 30)
+
+       area_factor = 1.0
+       area_name = '일반'
+       
+       if any(keyword in street_text for keyword in ['강남', '테헤란', '서초', '역삼']):
+           area_factor = 0.75
+           area_name = '강남권'
+       elif any(keyword in street_text for keyword in ['종로', '을지로', '명동', '세종대로', '중구']):
+           area_factor = 0.8
+           area_name = '도심'
+       elif any(keyword in street_text for keyword in ['강변북로', '올림픽대로', '한강대로']):
+           area_factor = 1.3
+           area_name = '한강변'
+       elif any(keyword in street_text for keyword in ['외곽순환', '강서', '노원', '도봉']):
+           area_factor = 1.15
+           area_name = '외곽'
+
+       from datetime import datetime
+       import pytz
+       try:
+           kst = pytz.timezone('Asia/Seoul')
+           hour = datetime.now(kst).hour
+           
+           if 7 <= hour <= 9 or 18 <= hour <= 20:
+               time_factor = 0.6
+               time_desc = '출퇴근'
+           elif 12 <= hour <= 14:
+               time_factor = 0.8
+               time_desc = '점심'
+           elif 22 <= hour or hour <= 6:
+               time_factor = 1.4
+               time_desc = '심야'
+           else:
+               time_factor = 1.0
+               time_desc = '평시'
+       except:
+           time_factor = 1.0
+           time_desc = '평시'
+
+       final_speed = base_speed * condition_factor * area_factor * time_factor
+
+       final_speed = max(8, min(final_speed, 80))
+       
+       logger.info(f'🚦 {area_name} {road_class} {time_desc}: {final_speed:.1f}km/h '
+                  f'(전체상황: {traffic_condition} {congestion_ratio:.1%}, '
+                  f'기본: {base_speed}, 지역: {area_factor}, 시간: {time_factor})')
+       
+       return final_speed
    
    def apply_real_traffic_to_response(self, valhalla_response, use_traffic=False):
        if not use_traffic or not traffic_data or 'trip' not in valhalla_response:
@@ -171,7 +246,7 @@ class TrafficProxy:
                valhalla_response['trip']['real_traffic_applied'] = False
            return valhalla_response
        
-       logger.info("Valhalla 응답 인터셉트 - 실시간 교통 속도 적용 시작")
+       logger.info("현실적인 실시간 교통 적용 시작")
        
        applied_segments = 0
        total_segments = 0
@@ -191,21 +266,24 @@ class TrafficProxy:
                    
                    leg_original_time += original_time
 
-                   real_speed_kmh = self.find_real_speed_for_segment(maneuver)
-                   
-                   if real_speed_kmh and real_speed_kmh > 0 and segment_length > 0:
-                       new_time = (segment_length / real_speed_kmh) * 3600
+                   if segment_length > 0:
+                       real_speed_kmh = self.find_real_speed_for_segment(maneuver)
+                       
+                       if real_speed_kmh and real_speed_kmh > 0:
+                           new_time = (segment_length / real_speed_kmh) * 3600
 
-                       maneuver['time'] = new_time
-                       maneuver['original_time'] = original_time
-                       maneuver['real_speed_applied'] = real_speed_kmh
-                       
-                       leg_new_time += new_time
-                       applied_segments += 1
-                       
-                       logger.debug(f"실시간 속도 적용: {segment_length:.2f}km, "
-                                  f"{original_time:.1f}s → {new_time:.1f}s "
-                                  f"(실시간: {real_speed_kmh:.1f}km/h)")
+                           time_ratio = new_time / original_time if original_time > 0 else 1
+                           if 0.3 <= time_ratio <= 3.0:
+                               maneuver['time'] = new_time
+                               maneuver['original_time'] = original_time
+                               maneuver['real_speed_applied'] = real_speed_kmh
+                               
+                               leg_new_time += new_time
+                               applied_segments += 1
+                           else:
+                               leg_new_time += original_time
+                       else:
+                           leg_new_time += original_time
                    else:
                        leg_new_time += original_time
 
@@ -232,7 +310,7 @@ class TrafficProxy:
        
        if applied_segments > 0:
            time_change_pct = ((total_new_time - total_original_time) / total_original_time) * 100
-           logger.info(f"실시간 교통 적용 완료: {applied_segments}/{total_segments} 구간, "
+           logger.info(f"현실적인 교통 적용 완료: {applied_segments}/{total_segments} 구간, "
                       f"시간 변화: {time_change_pct:+.1f}%")
        else:
            logger.info("적용된 실시간 교통 구간 없음")
@@ -240,10 +318,30 @@ class TrafficProxy:
        return valhalla_response
 
    def apply_traffic_to_matrix(self, valhalla_result):
+       """매트릭스에도 현실적인 교통 적용"""
+       
        if not traffic_data:
            return valhalla_result
        
-       logger.info("Matrix에 실시간 교통 적용 시작")
+       logger.info('Matrix에 실시간 교통 적용 시작')
+       
+       # 현재 전체 교통 상황
+       current_speeds = [s for s in traffic_data.values() if 10 <= s <= 80]
+       if not current_speeds:
+           return valhalla_result
+       
+       avg_speed = sum(current_speeds) / len(current_speeds)
+       slow_ratio = len([s for s in current_speeds if s < 25]) / len(current_speeds)
+       
+       # 전체적인 교통 상황에 따른 보정 계수
+       if slow_ratio > 0.5:
+           global_factor = 0.7  # 전체적으로 혼잡
+       elif slow_ratio > 0.3:
+           global_factor = 0.85  # 보통
+       else:
+           global_factor = 1.0   # 원활
+       
+       applied_count = 0
        
        if 'sources_to_targets' in valhalla_result:
            for i, source_data in enumerate(valhalla_result['sources_to_targets']):
@@ -253,17 +351,27 @@ class TrafficProxy:
                            original_time = target_data['time']
                            distance = target_data.get('distance', 0)
                            
-                           if distance > 0 and traffic_data:
-                               speeds = [s for s in traffic_data.values() if 5 <= s <= 100]
-                               if speeds:
-                                   avg_speed = sum(speeds) / len(speeds)
-                                   if avg_speed < 40:
-                                       new_time = (distance / avg_speed) * 3600
-                                       target_data['time'] = new_time
-                                       target_data['original_time'] = original_time
-                                       target_data['traffic_applied'] = True
+                           if distance > 0:
+                               # 거리 기반 예상 속도
+                               if distance >= 5:  # 5km 이상 = 장거리
+                                   expected_speed = 45 * global_factor
+                               elif distance >= 2:  # 2-5km = 중거리
+                                   expected_speed = 35 * global_factor
+                               else:  # 2km 미만 = 단거리
+                                   expected_speed = 25 * global_factor
+                               
+                               new_time = (distance / expected_speed) * 3600
+                               
+                               # 극단적인 변화 방지
+                               time_ratio = new_time / original_time if original_time > 0 else 1
+                               if 0.5 <= time_ratio <= 2.0:
+                                   target_data['time'] = new_time
+                                   target_data['original_time'] = original_time
+                                   target_data['traffic_applied'] = True
+                                   target_data['applied_speed'] = expected_speed
+                                   applied_count += 1
        
-       logger.info("Matrix 실시간 교통 적용 완료")
+       logger.info(f'Matrix 교통 적용 완료: {applied_count}개 구간, 전체상황: {slow_ratio:.1%} 혼잡')
        return valhalla_result
    
    def start_traffic_updater(self):
@@ -479,7 +587,7 @@ def health():
        "valhalla_url": VALHALLA_URL,
        "kakao_api_configured": bool(KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE'),
        "geocoding_method": "kakao",
-       "intercept_method": "response_modification"
+       "intercept_method": "realistic_traffic_system"
    })
 
 @app.route('/search', methods=['GET'])
@@ -554,7 +662,7 @@ def traffic_debug():
        },
        "speed_distribution": speed_distribution,
        "sample_data": sample_data,
-       "method": "Valhalla 응답 인터셉트 후 실시간 속도로 시간 재계산"
+       "method": "현실적인 실시간 교통 시스템"
    })
 
 @app.route('/<path:path>', methods=['GET', 'POST'])
@@ -576,6 +684,6 @@ def proxy_all(path):
        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-   logger.info("Valhalla 응답 인터셉트 방식 Traffic Proxy 시작")
+   logger.info("현실적인 실시간 교통 시스템 시작")
    logger.info(f"카카오 API 설정: {'OK' if KAKAO_API_KEY and KAKAO_API_KEY != 'YOUR_KAKAO_API_KEY_HERE' else 'API KEY 필요'}")
    app.run(host='0.0.0.0', port=8003, debug=False)
