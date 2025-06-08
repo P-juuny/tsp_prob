@@ -324,22 +324,20 @@ class TrafficProxy:
            return valhalla_result
        
        logger.info('Matrix에 실시간 교통 적용 시작')
-       
-       # 현재 전체 교통 상황
+
        current_speeds = [s for s in traffic_data.values() if 10 <= s <= 80]
        if not current_speeds:
            return valhalla_result
        
        avg_speed = sum(current_speeds) / len(current_speeds)
        slow_ratio = len([s for s in current_speeds if s < 25]) / len(current_speeds)
-       
-       # 전체적인 교통 상황에 따른 보정 계수
+
        if slow_ratio > 0.5:
-           global_factor = 0.7  # 전체적으로 혼잡
+           global_factor = 0.7
        elif slow_ratio > 0.3:
-           global_factor = 0.85  # 보통
+           global_factor = 0.85
        else:
-           global_factor = 1.0   # 원활
+           global_factor = 1.0
        
        applied_count = 0
        
@@ -352,17 +350,15 @@ class TrafficProxy:
                            distance = target_data.get('distance', 0)
                            
                            if distance > 0:
-                               # 거리 기반 예상 속도
-                               if distance >= 5:  # 5km 이상 = 장거리
+                               if distance >= 5:
                                    expected_speed = 45 * global_factor
-                               elif distance >= 2:  # 2-5km = 중거리
+                               elif distance >= 2:
                                    expected_speed = 35 * global_factor
-                               else:  # 2km 미만 = 단거리
+                               else:
                                    expected_speed = 25 * global_factor
                                
                                new_time = (distance / expected_speed) * 3600
-                               
-                               # 극단적인 변화 방지
+
                                time_ratio = new_time / original_time if original_time > 0 else 1
                                if 0.5 <= time_ratio <= 2.0:
                                    target_data['time'] = new_time
